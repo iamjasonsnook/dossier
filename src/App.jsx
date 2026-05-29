@@ -28,7 +28,7 @@ GlobalWorkerOptions.workerSrc = workerUrl
 let _uid = 0
 const uid = () => `id-${++_uid}-${Math.random().toString(36).slice(2, 7)}`
 
-const wasmUrl = new URL('/wasm/', window.location.href).href
+const wasmUrl = new URL('wasm/', window.location.href).href
 
 async function renderThumb(page, displayWidth = 176) {
   const nativeVp = page.getViewport({ scale: 1 })
@@ -341,7 +341,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-brand">
-          <img src="/logo-white.svg" alt="SupportWorks Housing" className="swh-logo" />
+          <img src={`${import.meta.env.BASE_URL}logo-white.svg`} alt="SupportWorks Housing" className="swh-logo" />
           <div className="brand-divider" />
           <span className="brand-name">Dossier</span>
         </div>
