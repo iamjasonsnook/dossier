@@ -30,6 +30,14 @@ const uid = () => `id-${++_uid}-${Math.random().toString(36).slice(2, 7)}`
 
 const wasmUrl = new URL('wasm/', window.location.href).href
 
+function dataUrlToBytes(dataUrl) {
+  const base64 = dataUrl.split(',')[1]
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
 async function renderThumb(page, displayWidth = 176) {
   const nativeVp = page.getViewport({ scale: 1 })
   const renderCanvas = document.createElement('canvas')
@@ -73,6 +81,7 @@ function SortablePage({ page, onRemove, onPreview }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: page.id,
   })
+  const hasRedactions = page.redactions && page.redactions.length > 0
   return (
     <div
       ref={setNodeRef}
@@ -91,7 +100,14 @@ function SortablePage({ page, onRemove, onPreview }) {
       />
       <div className="output-card-meta">
         <span className="output-card-file" title={page.sourceName}>{page.sourceName}</span>
-        <span className="output-card-page">p. {page.pageIndex + 1}</span>
+        <span className="output-card-page">
+          p. {page.pageIndex + 1}
+          {hasRedactions && (
+            <span className="redacted-badge" title={`${page.redactions.length} redaction${page.redactions.length !== 1 ? 's' : ''}`}>
+              {page.redactions.length} redacted
+            </span>
+          )}
+        </span>
       </div>
       <button className="output-card-remove" onClick={() => onRemove(page.id)} title="Remove">×</button>
     </div>
@@ -134,17 +150,22 @@ function OutputDropZone({ children, hasCards }) {
   )
 }
 
-function PagePreview({ item, sourcePdfs, outputPages, addPage, onClose }) {
+function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, onRemoveRedaction, onClose }) {
   const pdf = sourcePdfs.find(p => p.id === item.pdfId)
   const [currentIndex, setCurrentIndex] = useState(item.pageIndex)
   const [previewUrl, setPreviewUrl] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [isRedacting, setIsRedacting] = useState(false)
+  const [drawingRect, setDrawingRect] = useState(null)
+  const overlayRef = useRef(null)
 
   const totalPages = pdf?.pages.length ?? 0
   const addedSet = new Set(outputPages.map(p => p.sourcePageId))
   const currentSourcePageId = `${item.pdfId}::${currentIndex}`
   const currentIsAdded = addedSet.has(currentSourcePageId)
   const currentPage = pdf?.pages.find(p => p.pageIndex === currentIndex)
+  const outputPage = outputPages.find(p => p.sourceId === item.pdfId && p.pageIndex === currentIndex)
+  const redactions = outputPage?.redactions || []
 
   useEffect(() => {
     if (!pdf?.bytes) return
@@ -157,15 +178,67 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onClose }) {
     return () => { cancelled = true }
   }, [pdf, currentIndex])
 
+  // Reset redact mode when navigating
+  useEffect(() => {
+    setIsRedacting(false)
+    setDrawingRect(null)
+  }, [currentIndex])
+
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        if (isRedacting) { setIsRedacting(false); return }
+        onClose()
+      }
       if (e.key === 'ArrowLeft' && currentIndex > 0) setCurrentIndex(i => i - 1)
       if (e.key === 'ArrowRight' && currentIndex < totalPages - 1) setCurrentIndex(i => i + 1)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [currentIndex, totalPages, onClose])
+  }, [currentIndex, totalPages, isRedacting, onClose])
+
+  const getRelativeCoords = (e) => {
+    const el = overlayRef.current
+    if (!el) return { x: 0, y: 0 }
+    const rect = el.getBoundingClientRect()
+    return {
+      x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
+    }
+  }
+
+  const onPointerDown = (e) => {
+    if (!isRedacting) return
+    e.preventDefault()
+    const { x, y } = getRelativeCoords(e)
+    setDrawingRect({ startX: x, startY: y, currentX: x, currentY: y })
+    overlayRef.current?.setPointerCapture(e.pointerId)
+  }
+
+  const onPointerMove = (e) => {
+    if (!drawingRect) return
+    const { x, y } = getRelativeCoords(e)
+    setDrawingRect(prev => ({ ...prev, currentX: x, currentY: y }))
+  }
+
+  const onPointerUp = () => {
+    if (!drawingRect || !outputPage) return
+    const minX = Math.min(drawingRect.startX, drawingRect.currentX)
+    const minY = Math.min(drawingRect.startY, drawingRect.currentY)
+    const w = Math.abs(drawingRect.currentX - drawingRect.startX)
+    const h = Math.abs(drawingRect.currentY - drawingRect.startY)
+    if (w > 0.01 && h > 0.01) {
+      onAddRedaction(outputPage.id, { x: minX, y: minY, w, h })
+    }
+    setDrawingRect(null)
+  }
+
+  const drawingStyle = drawingRect ? {
+    left: `${Math.min(drawingRect.startX, drawingRect.currentX) * 100}%`,
+    top: `${Math.min(drawingRect.startY, drawingRect.currentY) * 100}%`,
+    width: `${Math.abs(drawingRect.currentX - drawingRect.startX) * 100}%`,
+    height: `${Math.abs(drawingRect.currentY - drawingRect.startY) * 100}%`,
+  } : null
 
   const handleAdd = () => {
     if (!currentPage || currentIsAdded) return
@@ -187,12 +260,39 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onClose }) {
           )}
           <div className="preview-image-wrap">
             {loading && (
-              <div className="preview-spinner">
-                <div className="spinner" />
-              </div>
+              <div className="preview-spinner"><div className="spinner" /></div>
             )}
             {previewUrl && (
-              <img src={previewUrl} className="preview-image" alt={`Page ${currentIndex + 1}`} />
+              <div className="preview-image-container">
+                <img src={previewUrl} className="preview-image" alt={`Page ${currentIndex + 1}`} />
+                {/* Redaction overlay — always rendered so existing boxes show */}
+                <div
+                  ref={overlayRef}
+                  className={`redaction-overlay${isRedacting ? ' is-active' : ''}`}
+                  onPointerDown={onPointerDown}
+                  onPointerMove={onPointerMove}
+                  onPointerUp={onPointerUp}
+                >
+                  {redactions.map((r, i) => (
+                    <div
+                      key={i}
+                      className="redaction-box"
+                      style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` }}
+                    >
+                      {isRedacting && outputPage && (
+                        <button
+                          className="redaction-remove"
+                          onClick={e => { e.stopPropagation(); onRemoveRedaction(outputPage.id, i) }}
+                          title="Remove redaction"
+                        >×</button>
+                      )}
+                    </div>
+                  ))}
+                  {drawingStyle && (
+                    <div className="redaction-box is-drawing" style={drawingStyle} />
+                  )}
+                </div>
+              </div>
             )}
           </div>
           {currentIndex < totalPages - 1 && (
@@ -208,7 +308,21 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onClose }) {
           >
             {currentIsAdded ? '✓ In Tray' : '+ Add to Tray'}
           </button>
+          {currentIsAdded && outputPage && (
+            <button
+              className={`btn-redact${isRedacting ? ' is-active' : ''}`}
+              onClick={() => setIsRedacting(r => !r)}
+              title={isRedacting ? 'Exit redact mode' : 'Draw redaction boxes over sensitive text'}
+            >
+              {isRedacting ? 'Done Redacting' : `Redact${redactions.length > 0 ? ` (${redactions.length})` : ''}`}
+            </button>
+          )}
         </div>
+        {isRedacting && (
+          <div className="redact-hint">
+            Click and drag to draw a redaction box. Text under black boxes is permanently removed on export.
+          </div>
+        )}
       </div>
     </div>
   )
@@ -291,10 +405,27 @@ export default function App() {
       pageIndex: page.pageIndex,
       sourceName: pdf.name.replace(/\.pdf$/i, ''),
       thumbUrl: page.thumbUrl,
+      redactions: [],
     }])
   }
 
   const removePage = (id) => setOutputPages(prev => prev.filter(p => p.id !== id))
+
+  const addRedaction = (outputPageId, rect) => {
+    setOutputPages(prev => prev.map(p =>
+      p.id === outputPageId
+        ? { ...p, redactions: [...p.redactions, rect] }
+        : p
+    ))
+  }
+
+  const removeRedaction = (outputPageId, index) => {
+    setOutputPages(prev => prev.map(p =>
+      p.id === outputPageId
+        ? { ...p, redactions: p.redactions.filter((_, i) => i !== index) }
+        : p
+    ))
+  }
 
   const toggleCollapse = (pdfId) => {
     setCollapsedPdfs(prev => {
@@ -316,13 +447,11 @@ export default function App() {
 
     const dragData = active.data.current
     if (dragData?.type === 'source-page') {
-      // Cross-panel: source thumb dropped onto output tray or an output card
       const droppedOnTray = over.id === 'output-tray' || outputPages.some(p => p.id === over.id)
       if (droppedOnTray) addPage(dragData.pdf, dragData.page)
       return
     }
 
-    // Output-to-output reorder
     if (active.id === over.id) return
     setOutputPages(prev => {
       const from = prev.findIndex(p => p.id === active.id)
@@ -423,11 +552,8 @@ export default function App() {
                       onClick={() => toggleCollapse(pdf.id)}
                       title={collapsed ? 'Expand' : 'Collapse'}
                     >
-                      <svg
-                        className="file-chevron"
-                        width="10" height="10" viewBox="0 0 10 10"
-                        fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"
-                      >
+                      <svg className="file-chevron" width="10" height="10" viewBox="0 0 10 10"
+                        fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                         <path d="M2 3.5L5 6.5L8 3.5" />
                       </svg>
                       <svg width="13" height="15" viewBox="0 0 13 15" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -528,6 +654,8 @@ export default function App() {
           sourcePdfs={sourcePdfs}
           outputPages={outputPages}
           addPage={addPage}
+          onAddRedaction={addRedaction}
+          onRemoveRedaction={removeRedaction}
           onClose={() => setPreviewItem(null)}
         />
       )}
@@ -537,17 +665,63 @@ export default function App() {
   async function exportPdf() {
     if (!outputPages.length) return
     const out = await PDFDocument.create()
-    const loaded = {}
+    const pdfLibCache = {}
+    const pdfJsCache = {}
+
     for (const op of outputPages) {
-      if (!loaded[op.sourceId]) {
-        const src = sourcePdfs.find(p => p.id === op.sourceId)
-        if (src) loaded[op.sourceId] = await PDFDocument.load(src.bytes)
+      const src = sourcePdfs.find(p => p.id === op.sourceId)
+      if (!src) continue
+
+      if (op.redactions && op.redactions.length > 0) {
+        // ── Redacted page: render to canvas, burn in black boxes, embed as image ──
+        if (!pdfJsCache[op.sourceId]) {
+          const buf = src.bytes.buffer.slice(src.bytes.byteOffset, src.bytes.byteOffset + src.bytes.byteLength)
+          pdfJsCache[op.sourceId] = await getDocument({ data: buf, wasmUrl }).promise
+        }
+        const pdfJsDoc = pdfJsCache[op.sourceId]
+        const page = await pdfJsDoc.getPage(op.pageIndex + 1)
+
+        // Render at 2× for quality; native viewport gives us point dimensions
+        const scale = 2
+        const renderVp = page.getViewport({ scale })
+        const nativeVp = page.getViewport({ scale: 1 })
+
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.ceil(renderVp.width)
+        canvas.height = Math.ceil(renderVp.height)
+
+        // Pass canvas (not canvasContext) so PDF.js uses willReadFrequently
+        await page.render({ canvas, viewport: renderVp }).promise
+
+        // Burn redactions into pixels — permanently overwrites content
+        const ctx = canvas.getContext('2d')
+        ctx.fillStyle = '#000000'
+        for (const r of op.redactions) {
+          ctx.fillRect(
+            r.x * renderVp.width,
+            r.y * renderVp.height,
+            r.w * renderVp.width,
+            r.h * renderVp.height
+          )
+        }
+
+        const pngBytes = dataUrlToBytes(canvas.toDataURL('image/png'))
+        canvas.width = 0
+        canvas.height = 0
+
+        const pngImage = await out.embedPng(pngBytes)
+        const newPage = out.addPage([nativeVp.width, nativeVp.height])
+        newPage.drawImage(pngImage, { x: 0, y: 0, width: nativeVp.width, height: nativeVp.height })
+      } else {
+        // ── Normal page: copy vectors/text intact ──
+        if (!pdfLibCache[op.sourceId]) {
+          pdfLibCache[op.sourceId] = await PDFDocument.load(src.bytes)
+        }
+        const [copied] = await out.copyPages(pdfLibCache[op.sourceId], [op.pageIndex])
+        out.addPage(copied)
       }
-      const srcDoc = loaded[op.sourceId]
-      if (!srcDoc) continue
-      const [copied] = await out.copyPages(srcDoc, [op.pageIndex])
-      out.addPage(copied)
     }
+
     const pdfBytes = await out.save()
     const blob = new Blob([pdfBytes], { type: 'application/pdf' })
     const url = URL.createObjectURL(blob)

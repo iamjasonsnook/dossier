@@ -811,3 +811,111 @@ html, body, #root {
   opacity: 1;
   cursor: default;
 }
+
+.btn-redact {
+  height: 36px;
+  padding: 0 20px;
+  background: transparent;
+  color: var(--brand);
+  border: 1.5px solid var(--brand-border);
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s;
+  letter-spacing: .1px;
+}
+
+.btn-redact:hover { background: var(--brand-pale); border-color: var(--brand); }
+
+.btn-redact.is-active {
+  background: #1A1A1A;
+  color: #fff;
+  border-color: #1A1A1A;
+}
+
+.btn-redact.is-active:hover { background: #333; border-color: #333; }
+
+/* ── Redaction drawing overlay ── */
+.preview-image-container {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.redaction-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.redaction-overlay.is-active {
+  pointer-events: all;
+  cursor: crosshair;
+}
+
+.redaction-box {
+  position: absolute;
+  background: #000;
+  pointer-events: none;
+}
+
+/* In redact mode, enable pointer events on boxes so ✕ is clickable */
+.redaction-overlay.is-active .redaction-box {
+  pointer-events: all;
+  cursor: default;
+}
+
+.redaction-box.is-drawing {
+  pointer-events: none;
+  opacity: 0.75;
+  outline: 1.5px dashed rgba(255,255,255,.5);
+}
+
+.redaction-remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #DC2626;
+  color: #fff;
+  border: 2px solid #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+
+/* ── Redact hint bar ── */
+.redact-hint {
+  padding: 8px 18px;
+  background: #1A1A1A;
+  color: rgba(255,255,255,.75);
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: .2px;
+  flex-shrink: 0;
+}
+
+/* ── Redacted badge on output card ── */
+.redacted-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  background: #1A1A1A;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
