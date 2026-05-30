@@ -209,6 +209,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
 
   const onPointerDown = (e) => {
     if (!isRedacting) return
+    if (e.target.closest('.redaction-remove')) return
     e.preventDefault()
     const { x, y } = getRelativeCoords(e)
     setDrawingRect({ startX: x, startY: y, currentX: x, currentY: y })
@@ -282,6 +283,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
                       {isRedacting && outputPage && (
                         <button
                           className="redaction-remove"
+                          onPointerDown={e => e.stopPropagation()}
                           onClick={e => { e.stopPropagation(); onRemoveRedaction(outputPage.id, i) }}
                           title="Remove redaction"
                         >×</button>
