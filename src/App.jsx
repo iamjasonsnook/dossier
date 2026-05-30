@@ -3,22 +3,12 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { PDFDocument } from 'pdf-lib'
 import {
-  DndContext,
-  closestCenter,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  DragOverlay,
-  useDraggable,
-  useDroppable,
+  DndContext, closestCenter, KeyboardSensor, PointerSensor,
+  useSensor, useSensors, DragOverlay, useDraggable, useDroppable,
 } from '@dnd-kit/core'
 import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-  useSortable,
-  arrayMove,
+  SortableContext, sortableKeyboardCoordinates,
+  verticalListSortingStrategy, useSortable, arrayMove,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import './App.css'
@@ -27,15 +17,17 @@ GlobalWorkerOptions.workerSrc = workerUrl
 
 let _uid = 0
 const uid = () => `id-${++_uid}-${Math.random().toString(36).slice(2, 7)}`
-
 const wasmUrl = new URL('wasm/', window.location.href).href
+const PREVIEW_WIDTH = 900 // px width used by renderPreview — used to scale fonts at export
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function dataUrlToBytes(dataUrl) {
-  const base64 = dataUrl.split(',')[1]
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
+  const b64 = dataUrl.split(',')[1]
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
 }
 
 async function renderThumb(page, displayWidth = 176) {
@@ -61,40 +53,226 @@ async function renderPreview(pdfBytes, pageIndex) {
   const buf = pdfBytes.buffer.slice(pdfBytes.byteOffset, pdfBytes.byteOffset + pdfBytes.byteLength)
   const pdfDoc = await getDocument({ data: buf, wasmUrl }).promise
   const page = await pdfDoc.getPage(pageIndex + 1)
-  return renderThumb(page, 900)
+  return renderThumb(page, PREVIEW_WIDTH)
 }
+
+// Ensure Dancing Script is ready in canvas context before drawing signatures
+async function ensureSignatureFont() {
+  try { await document.fonts.load('700 48px "Dancing Script"') } catch (_) {}
+}
+
+// Word-wrapped text for canvas — returns the final y position after drawing
+function canvasDrawText(ctx, text, x, y, maxWidth, lineHeight) {
+  let cy = y
+  for (const para of text.split('\n')) {
+    if (!para.trim()) { cy += lineHeight; continue }
+    let line = ''
+    for (const word of para.split(' ')) {
+      const test = line ? `${line} ${word}` : word
+      if (ctx.measureText(test).width > maxWidth && line) {
+        ctx.fillText(line, x, cy)
+        line = word
+        cy += lineHeight
+      } else {
+        line = test
+      }
+    }
+    if (line) { ctx.fillText(line, x, cy); cy += lineHeight }
+  }
+  return cy
+}
+
+// ─── Drag-handle hook — shared by TextAnnotation and SignatureAnnotation ─────
+
+function useDragHandle(overlayRef, annotation, onUpdate) {
+  const ref = useRef(null)
+
+  const onPointerDown = (e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return
+    ref.current = { sx: e.clientX / r.width, sy: e.clientY / r.height, ox: annotation.x, oy: annotation.y }
+  }
+  const onPointerMove = (e) => {
+    if (!ref.current) return
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return
+    onUpdate(annotation.id, {
+      x: Math.max(0, ref.current.ox + e.clientX / r.width - ref.current.sx),
+      y: Math.max(0, ref.current.oy + e.clientY / r.height - ref.current.sy),
+    })
+  }
+  const onPointerUp = () => { ref.current = null }
+  return { onPointerDown, onPointerMove, onPointerUp }
+}
+
+// ─── TextAnnotation ───────────────────────────────────────────────────────────
+
+function TextAnnotation({ annotation, overlayRef, containerWidth, onUpdate, onRemove }) {
+  const drag = useDragHandle(overlayRef, annotation, onUpdate)
+  const resizeRef = useRef(null)
+  const textareaRef = useRef(null)
+
+  // Auto-size textarea height whenever text changes
+  useEffect(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    ta.style.height = 'auto'
+    ta.style.height = `${ta.scrollHeight}px`
+  }, [annotation.text])
+
+  // Focus on creation
+  useEffect(() => { if (annotation.text === '') textareaRef.current?.focus() }, [])
+
+  const onResizePointerDown = (e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return
+    resizeRef.current = { sx: e.clientX / r.width, ow: annotation.w }
+  }
+  const onResizePointerMove = (e) => {
+    if (!resizeRef.current) return
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return
+    const dx = e.clientX / r.width - resizeRef.current.sx
+    onUpdate(annotation.id, { w: Math.max(0.12, Math.min(0.98, resizeRef.current.ow + dx)) })
+  }
+  const onResizePointerUp = () => { resizeRef.current = null }
+
+  const fontSize = Math.round(annotation.fontSize * (containerWidth / PREVIEW_WIDTH))
+
+  return (
+    <div
+      className="annotation text-annotation"
+      style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%`, width: `${annotation.w * 100}%` }}
+    >
+      <div
+        className="annotation-header"
+        onPointerDown={drag.onPointerDown}
+        onPointerMove={drag.onPointerMove}
+        onPointerUp={drag.onPointerUp}
+      >
+        <span className="annotation-type-label">Text</span>
+        <button
+          className="annotation-remove"
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
+        >×</button>
+      </div>
+      <textarea
+        ref={textareaRef}
+        className="annotation-textarea"
+        value={annotation.text}
+        style={{ fontSize: `${fontSize}px` }}
+        onChange={e => onUpdate(annotation.id, { text: e.target.value })}
+        onPointerDown={e => e.stopPropagation()}
+        placeholder="Type here…"
+        rows={1}
+      />
+      <div
+        className="annotation-resize-handle"
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+      />
+    </div>
+  )
+}
+
+// ─── SignatureAnnotation ──────────────────────────────────────────────────────
+
+function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate, onRemove }) {
+  const drag = useDragHandle(overlayRef, annotation, onUpdate)
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    if (annotation.inputMode) inputRef.current?.focus()
+  }, [annotation.inputMode])
+
+  const commitSignature = (raw) => {
+    const text = raw.trim()
+    if (!text) { onRemove(annotation.id); return }
+    // Estimate width: signature font is wide; ~0.028 per char is a reasonable heuristic
+    const w = Math.min(0.75, Math.max(0.18, text.length * 0.028))
+    onUpdate(annotation.id, { text, inputMode: false, w })
+  }
+
+  const fontSize = Math.round(annotation.fontSize * (containerWidth / PREVIEW_WIDTH))
+
+  if (annotation.inputMode) {
+    return (
+      <div
+        className="annotation signature-annotation input-mode"
+        style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%` }}
+      >
+        <input
+          ref={inputRef}
+          className="signature-input"
+          defaultValue=""
+          placeholder="Type name, press Enter"
+          onPointerDown={e => e.stopPropagation()}
+          onKeyDown={e => {
+            if (e.key === 'Enter') { e.preventDefault(); commitSignature(e.target.value) }
+            if (e.key === 'Escape') onRemove(annotation.id)
+          }}
+        />
+        <button
+          className="annotation-remove"
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
+        >×</button>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="annotation signature-annotation"
+      style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%` }}
+      onPointerDown={drag.onPointerDown}
+      onPointerMove={drag.onPointerMove}
+      onPointerUp={drag.onPointerUp}
+    >
+      <span className="signature-text" style={{ fontSize: `${fontSize}px` }}>
+        {annotation.text}
+      </span>
+      <button
+        className="annotation-remove"
+        onPointerDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
+      >×</button>
+    </div>
+  )
+}
+
+// ─── Small shell components ───────────────────────────────────────────────────
 
 function GripIcon() {
   return (
     <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor">
-      <circle cx="3.5" cy="2.5" r="1.3" />
-      <circle cx="8.5" cy="2.5" r="1.3" />
-      <circle cx="3.5" cy="7" r="1.3" />
-      <circle cx="8.5" cy="7" r="1.3" />
-      <circle cx="3.5" cy="11.5" r="1.3" />
-      <circle cx="8.5" cy="11.5" r="1.3" />
+      <circle cx="3.5" cy="2.5" r="1.3" /><circle cx="8.5" cy="2.5" r="1.3" />
+      <circle cx="3.5" cy="7" r="1.3" /><circle cx="8.5" cy="7" r="1.3" />
+      <circle cx="3.5" cy="11.5" r="1.3" /><circle cx="8.5" cy="11.5" r="1.3" />
     </svg>
   )
 }
 
 function SortablePage({ page, onRemove, onPreview }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: page.id,
-  })
-  const hasRedactions = page.redactions && page.redactions.length > 0
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: page.id })
+  const modCount = (page.redactions?.length || 0) + (page.annotations?.length || 0)
   return (
     <div
       ref={setNodeRef}
       className={`output-card${isDragging ? ' is-dragging' : ''}`}
       style={{ transform: CSS.Transform.toString(transform), transition }}
     >
-      <div className="output-card-grip" {...attributes} {...listeners}>
-        <GripIcon />
-      </div>
+      <div className="output-card-grip" {...attributes} {...listeners}><GripIcon /></div>
       <img
-        src={page.thumbUrl}
-        className="output-card-thumb"
-        alt=""
+        src={page.thumbUrl} className="output-card-thumb" alt=""
         onClick={() => onPreview(page.sourceId, page.pageIndex)}
         style={{ cursor: 'zoom-in' }}
       />
@@ -102,11 +280,7 @@ function SortablePage({ page, onRemove, onPreview }) {
         <span className="output-card-file" title={page.sourceName}>{page.sourceName}</span>
         <span className="output-card-page">
           p. {page.pageIndex + 1}
-          {hasRedactions && (
-            <span className="redacted-badge" title={`${page.redactions.length} redaction${page.redactions.length !== 1 ? 's' : ''}`}>
-              {page.redactions.length} redacted
-            </span>
-          )}
+          {modCount > 0 && <span className="modified-badge">{modCount} marked</span>}
         </span>
       </div>
       <button className="output-card-remove" onClick={() => onRemove(page.id)} title="Remove">×</button>
@@ -126,12 +300,9 @@ function DraggableSourceThumb({ pdf, page, isAdded, onClick }) {
       style={{ opacity: isDragging ? 0.3 : undefined }}
       onClick={onClick}
       title={`Page ${page.pageIndex + 1}${isAdded ? ' — in tray' : ' — click to preview · drag to add'}`}
-      {...attributes}
-      {...listeners}
+      {...attributes} {...listeners}
     >
-      {page.thumbUrl
-        ? <img src={page.thumbUrl} alt="" />
-        : <span className="thumb-err">?</span>}
+      {page.thumbUrl ? <img src={page.thumbUrl} alt="" /> : <span className="thumb-err">?</span>}
       <span className="thumb-num">{page.pageIndex + 1}</span>
       {isAdded && <span className="thumb-check">✓</span>}
     </button>
@@ -141,23 +312,24 @@ function DraggableSourceThumb({ pdf, page, isAdded, onClick }) {
 function OutputDropZone({ children, hasCards }) {
   const { setNodeRef, isOver } = useDroppable({ id: 'output-tray' })
   return (
-    <div
-      ref={setNodeRef}
-      className={`output-scroll${isOver && !hasCards ? ' drop-over' : ''}`}
-    >
+    <div ref={setNodeRef} className={`output-scroll${isOver && !hasCards ? ' drop-over' : ''}`}>
       {children}
     </div>
   )
 }
 
-function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, onRemoveRedaction, onClose }) {
+// ─── PagePreview ──────────────────────────────────────────────────────────────
+
+function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, onRemoveRedaction, onAddAnnotation, onUpdateAnnotation, onRemoveAnnotation, onClose }) {
   const pdf = sourcePdfs.find(p => p.id === item.pdfId)
   const [currentIndex, setCurrentIndex] = useState(item.pageIndex)
   const [previewUrl, setPreviewUrl] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [isRedacting, setIsRedacting] = useState(false)
+  const [activeTool, setActiveTool] = useState(null) // null | 'redact' | 'text' | 'signature'
   const [drawingRect, setDrawingRect] = useState(null)
+  const [containerWidth, setContainerWidth] = useState(PREVIEW_WIDTH)
   const overlayRef = useRef(null)
+  const pointerDownPos = useRef(null)
 
   const totalPages = pdf?.pages.length ?? 0
   const addedSet = new Set(outputPages.map(p => p.sourcePageId))
@@ -166,7 +338,9 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
   const currentPage = pdf?.pages.find(p => p.pageIndex === currentIndex)
   const outputPage = outputPages.find(p => p.sourceId === item.pdfId && p.pageIndex === currentIndex)
   const redactions = outputPage?.redactions || []
+  const annotations = outputPage?.annotations || []
 
+  // Render high-res preview
   useEffect(() => {
     if (!pdf?.bytes) return
     let cancelled = false
@@ -178,16 +352,26 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
     return () => { cancelled = true }
   }, [pdf, currentIndex])
 
-  // Reset redact mode when navigating
+  // Reset tool when navigating pages
   useEffect(() => {
-    setIsRedacting(false)
+    setActiveTool(null)
     setDrawingRect(null)
   }, [currentIndex])
 
+  // Track overlay width for proportional font sizing
+  useEffect(() => {
+    const el = overlayRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => setContainerWidth(entry.contentRect.width))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [previewUrl])
+
+  // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') {
-        if (isRedacting) { setIsRedacting(false); return }
+        if (activeTool) { setActiveTool(null); return }
         onClose()
       }
       if (e.key === 'ArrowLeft' && currentIndex > 0) setCurrentIndex(i => i - 1)
@@ -195,50 +379,77 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [currentIndex, totalPages, isRedacting, onClose])
+  }, [currentIndex, totalPages, activeTool, onClose])
 
-  const getRelativeCoords = (e) => {
-    const el = overlayRef.current
-    if (!el) return { x: 0, y: 0 }
-    const rect = el.getBoundingClientRect()
+  // Normalized coords from pointer event relative to overlay
+  const normCoords = (e) => {
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return { x: 0, y: 0 }
     return {
-      x: Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)),
+      x: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)),
     }
   }
 
-  const onPointerDown = (e) => {
-    if (!isRedacting) return
-    if (e.target.closest('.redaction-remove')) return
-    e.preventDefault()
-    const { x, y } = getRelativeCoords(e)
-    setDrawingRect({ startX: x, startY: y, currentX: x, currentY: y })
-    overlayRef.current?.setPointerCapture(e.pointerId)
-  }
+  // ── Overlay pointer handlers ─────────────────────────────────────────────
 
-  const onPointerMove = (e) => {
-    if (!drawingRect) return
-    const { x, y } = getRelativeCoords(e)
-    setDrawingRect(prev => ({ ...prev, currentX: x, currentY: y }))
-  }
+  const onOverlayPointerDown = (e) => {
+    // Clicks on annotations or redaction elements are handled by those elements
+    if (e.target.closest('.annotation, .redaction-box')) return
 
-  const onPointerUp = () => {
-    if (!drawingRect || !outputPage) return
-    const minX = Math.min(drawingRect.startX, drawingRect.currentX)
-    const minY = Math.min(drawingRect.startY, drawingRect.currentY)
-    const w = Math.abs(drawingRect.currentX - drawingRect.startX)
-    const h = Math.abs(drawingRect.currentY - drawingRect.startY)
-    if (w > 0.01 && h > 0.01) {
-      onAddRedaction(outputPage.id, { x: minX, y: minY, w, h })
+    pointerDownPos.current = { x: e.clientX, y: e.clientY }
+
+    if (activeTool === 'redact') {
+      e.preventDefault()
+      const { x, y } = normCoords(e)
+      setDrawingRect({ sx: x, sy: y, cx: x, cy: y })
+      overlayRef.current?.setPointerCapture(e.pointerId)
     }
-    setDrawingRect(null)
   }
+
+  const onOverlayPointerMove = (e) => {
+    if (activeTool === 'redact' && drawingRect) {
+      const { x, y } = normCoords(e)
+      setDrawingRect(r => ({ ...r, cx: x, cy: y }))
+    }
+  }
+
+  const onOverlayPointerUp = (e) => {
+    if (activeTool === 'redact' && drawingRect) {
+      const minX = Math.min(drawingRect.sx, drawingRect.cx)
+      const minY = Math.min(drawingRect.sy, drawingRect.cy)
+      const w = Math.abs(drawingRect.cx - drawingRect.sx)
+      const h = Math.abs(drawingRect.cy - drawingRect.sy)
+      if (outputPage && w > 0.01 && h > 0.01) {
+        onAddRedaction(outputPage.id, { x: minX, y: minY, w, h })
+      }
+      setDrawingRect(null)
+      return
+    }
+
+    // Click detection for text/signature placement
+    if (!pointerDownPos.current) return
+    const moved = Math.hypot(e.clientX - pointerDownPos.current.x, e.clientY - pointerDownPos.current.y)
+    pointerDownPos.current = null
+    if (moved > 5 || !outputPage) return
+
+    const { x, y } = normCoords(e)
+
+    if (activeTool === 'text') {
+      onAddAnnotation(outputPage.id, { id: uid(), type: 'text', x, y, w: 0.35, text: '', fontSize: 18 })
+    }
+    if (activeTool === 'signature') {
+      onAddAnnotation(outputPage.id, { id: uid(), type: 'signature', x, y, w: 0.3, text: '', fontSize: 52, inputMode: true })
+    }
+  }
+
+  const toggleTool = (tool) => setActiveTool(t => t === tool ? null : tool)
 
   const drawingStyle = drawingRect ? {
-    left: `${Math.min(drawingRect.startX, drawingRect.currentX) * 100}%`,
-    top: `${Math.min(drawingRect.startY, drawingRect.currentY) * 100}%`,
-    width: `${Math.abs(drawingRect.currentX - drawingRect.startX) * 100}%`,
-    height: `${Math.abs(drawingRect.currentY - drawingRect.startY) * 100}%`,
+    left: `${Math.min(drawingRect.sx, drawingRect.cx) * 100}%`,
+    top: `${Math.min(drawingRect.sy, drawingRect.cy) * 100}%`,
+    width: `${Math.abs(drawingRect.cx - drawingRect.sx) * 100}%`,
+    height: `${Math.abs(drawingRect.cy - drawingRect.sy) * 100}%`,
   } : null
 
   const handleAdd = () => {
@@ -246,9 +457,16 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
     addPage(pdf, currentPage)
   }
 
+  const toolHint = {
+    redact: 'Drag to draw a redaction box. Text beneath is permanently removed on export.',
+    text: 'Click anywhere on the page to place a text box.',
+    signature: 'Click where you want to sign, then type a name and press Enter.',
+  }
+
   return (
     <div className="preview-overlay" onClick={onClose}>
       <div className="preview-modal" onClick={e => e.stopPropagation()}>
+
         <div className="preview-header">
           <span className="preview-filename" title={pdf?.name}>{pdf?.name}</span>
           <span className="preview-page-info">Page {currentIndex + 1} of {totalPages}</span>
@@ -260,39 +478,50 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
             <button className="preview-nav prev" onClick={() => setCurrentIndex(i => i - 1)}>‹</button>
           )}
           <div className="preview-image-wrap">
-            {loading && (
-              <div className="preview-spinner"><div className="spinner" /></div>
-            )}
+            {loading && <div className="preview-spinner"><div className="spinner" /></div>}
             {previewUrl && (
               <div className="preview-image-container">
                 <img src={previewUrl} className="preview-image" alt={`Page ${currentIndex + 1}`} />
-                {/* Redaction overlay — always rendered so existing boxes show */}
+
+                {/* Unified annotation + redaction overlay */}
                 <div
                   ref={overlayRef}
-                  className={`redaction-overlay${isRedacting ? ' is-active' : ''}`}
-                  onPointerDown={onPointerDown}
-                  onPointerMove={onPointerMove}
-                  onPointerUp={onPointerUp}
+                  className={`annotation-layer${activeTool ? ` tool-${activeTool}` : ''}`}
+                  onPointerDown={onOverlayPointerDown}
+                  onPointerMove={onOverlayPointerMove}
+                  onPointerUp={onOverlayPointerUp}
                 >
+                  {/* Redaction boxes */}
                   {redactions.map((r, i) => (
-                    <div
-                      key={i}
-                      className="redaction-box"
+                    <div key={i} className="redaction-box"
                       style={{ left: `${r.x * 100}%`, top: `${r.y * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` }}
                     >
-                      {isRedacting && outputPage && (
-                        <button
-                          className="redaction-remove"
-                          onPointerDown={e => e.stopPropagation()}
+                      {activeTool === 'redact' && outputPage && (
+                        <button className="redaction-remove"
+                          onPointerDown={e => { e.stopPropagation(); e.preventDefault() }}
                           onClick={e => { e.stopPropagation(); onRemoveRedaction(outputPage.id, i) }}
-                          title="Remove redaction"
                         >×</button>
                       )}
                     </div>
                   ))}
-                  {drawingStyle && (
-                    <div className="redaction-box is-drawing" style={drawingStyle} />
-                  )}
+                  {drawingStyle && <div className="redaction-box is-drawing" style={drawingStyle} />}
+
+                  {/* Annotations */}
+                  {annotations.map(a => a.type === 'text' ? (
+                    <TextAnnotation
+                      key={a.id} annotation={a}
+                      overlayRef={overlayRef} containerWidth={containerWidth}
+                      onUpdate={(id, patch) => onUpdateAnnotation(outputPage.id, id, patch)}
+                      onRemove={id => onRemoveAnnotation(outputPage.id, id)}
+                    />
+                  ) : (
+                    <SignatureAnnotation
+                      key={a.id} annotation={a}
+                      overlayRef={overlayRef} containerWidth={containerWidth}
+                      onUpdate={(id, patch) => onUpdateAnnotation(outputPage.id, id, patch)}
+                      onRemove={id => onRemoveAnnotation(outputPage.id, id)}
+                    />
+                  ))}
                 </div>
               </div>
             )}
@@ -305,30 +534,39 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
         <div className="preview-footer">
           <button
             className={`btn-add-preview${currentIsAdded ? ' is-added' : ''}`}
-            onClick={handleAdd}
-            disabled={currentIsAdded}
+            onClick={handleAdd} disabled={currentIsAdded}
           >
             {currentIsAdded ? '✓ In Tray' : '+ Add to Tray'}
           </button>
+
           {currentIsAdded && outputPage && (
-            <button
-              className={`btn-redact${isRedacting ? ' is-active' : ''}`}
-              onClick={() => setIsRedacting(r => !r)}
-              title={isRedacting ? 'Exit redact mode' : 'Draw redaction boxes over sensitive text'}
-            >
-              {isRedacting ? 'Done Redacting' : `Redact${redactions.length > 0 ? ` (${redactions.length})` : ''}`}
-            </button>
+            <div className="preview-tools">
+              {['redact', 'text', 'signature'].map(tool => (
+                <button
+                  key={tool}
+                  className={`btn-tool${activeTool === tool ? ' is-active' : ''}`}
+                  onClick={() => toggleTool(tool)}
+                  title={toolHint[tool]}
+                >
+                  {{ redact: 'Redact', text: 'Text', signature: 'Signature' }[tool]}
+                  {tool === 'redact' && redactions.length > 0 && ` (${redactions.length})`}
+                  {tool !== 'redact' && annotations.filter(a => a.type === tool).length > 0 &&
+                    ` (${annotations.filter(a => a.type === tool).length})`}
+                </button>
+              ))}
+            </div>
           )}
         </div>
-        {isRedacting && (
-          <div className="redact-hint">
-            Click and drag to draw a redaction box. Text under black boxes is permanently removed on export.
-          </div>
+
+        {activeTool && (
+          <div className="tool-hint">{toolHint[activeTool]}</div>
         )}
       </div>
     </div>
   )
 }
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [sourcePdfs, setSourcePdfs] = useState([])
@@ -353,107 +591,72 @@ export default function App() {
     const pdfs = Array.from(files).filter(f => f.type === 'application/pdf')
     if (!pdfs.length) return
     setLoadingNames(pdfs.map(f => f.name))
-
     for (const file of pdfs) {
       const buf = await file.arrayBuffer()
       const bytes = new Uint8Array(buf)
-      const pdfJsBuf = bytes.buffer.slice(0)
       const pdfId = uid()
-
       setSourcePdfs(prev => [...prev, { id: pdfId, name: file.name, bytes, pages: [] }])
-
       try {
-        const pdfDoc = await getDocument({ data: pdfJsBuf, wasmUrl }).promise
+        const pdfDoc = await getDocument({ data: bytes.buffer.slice(0), wasmUrl }).promise
         for (let i = 0; i < pdfDoc.numPages; i++) {
           const page = await pdfDoc.getPage(i + 1)
           let thumbUrl = ''
-          try {
-            thumbUrl = await renderThumb(page)
-          } catch (err) {
-            console.warn(`Page ${i + 1} render failed:`, err)
-          }
+          try { thumbUrl = await renderThumb(page) } catch (err) { console.warn(`Page ${i + 1} render failed:`, err) }
           setSourcePdfs(prev => prev.map(p =>
-            p.id === pdfId
-              ? { ...p, pages: [...p.pages, { id: uid(), pageIndex: i, thumbUrl }] }
-              : p
+            p.id === pdfId ? { ...p, pages: [...p.pages, { id: uid(), pageIndex: i, thumbUrl }] } : p
           ))
         }
-      } catch (err) {
-        console.error('Failed to load:', file.name, err)
-      }
+      } catch (err) { console.error('Failed to load:', file.name, err) }
     }
-
     setLoadingNames([])
   }, [])
 
-  const handleDrop = useCallback((e) => {
-    e.preventDefault()
-    setDragOver(false)
-    loadPdfs(e.dataTransfer.files)
-  }, [loadPdfs])
-
-  const handleFileInput = (e) => {
-    loadPdfs(e.target.files)
-    e.target.value = ''
-  }
+  const handleDrop = useCallback((e) => { e.preventDefault(); setDragOver(false); loadPdfs(e.dataTransfer.files) }, [loadPdfs])
+  const handleFileInput = (e) => { loadPdfs(e.target.files); e.target.value = '' }
 
   const addPage = (pdf, page) => {
     const sourcePageId = `${pdf.id}::${page.pageIndex}`
     if (addedSet.has(sourcePageId)) return
     setOutputPages(prev => [...prev, {
-      id: uid(),
-      sourcePageId,
-      sourceId: pdf.id,
-      pageIndex: page.pageIndex,
-      sourceName: pdf.name.replace(/\.pdf$/i, ''),
-      thumbUrl: page.thumbUrl,
-      redactions: [],
+      id: uid(), sourcePageId, sourceId: pdf.id,
+      pageIndex: page.pageIndex, sourceName: pdf.name.replace(/\.pdf$/i, ''),
+      thumbUrl: page.thumbUrl, redactions: [], annotations: [],
     }])
   }
 
   const removePage = (id) => setOutputPages(prev => prev.filter(p => p.id !== id))
 
-  const addRedaction = (outputPageId, rect) => {
-    setOutputPages(prev => prev.map(p =>
-      p.id === outputPageId
-        ? { ...p, redactions: [...p.redactions, rect] }
-        : p
-    ))
-  }
-
-  const removeRedaction = (outputPageId, index) => {
-    setOutputPages(prev => prev.map(p =>
-      p.id === outputPageId
-        ? { ...p, redactions: p.redactions.filter((_, i) => i !== index) }
-        : p
-    ))
-  }
-
   const toggleCollapse = (pdfId) => {
-    setCollapsedPdfs(prev => {
-      const next = new Set(prev)
-      next.has(pdfId) ? next.delete(pdfId) : next.add(pdfId)
-      return next
-    })
+    setCollapsedPdfs(prev => { const n = new Set(prev); n.has(pdfId) ? n.delete(pdfId) : n.add(pdfId); return n })
   }
 
-  const handleDragStart = ({ active }) => {
-    setActiveDragId(active.id)
-    setActiveDragData(active.data.current ?? null)
-  }
+  // Redaction management
+  const addRedaction = (pageId, rect) =>
+    setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, redactions: [...p.redactions, rect] } : p))
+  const removeRedaction = (pageId, index) =>
+    setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, redactions: p.redactions.filter((_, i) => i !== index) } : p))
 
+  // Annotation management
+  const addAnnotation = (pageId, annotation) =>
+    setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, annotations: [...p.annotations, annotation] } : p))
+  const updateAnnotation = (pageId, annotId, patch) =>
+    setOutputPages(prev => prev.map(p =>
+      p.id === pageId ? { ...p, annotations: p.annotations.map(a => a.id === annotId ? { ...a, ...patch } : a) } : p
+    ))
+  const removeAnnotation = (pageId, annotId) =>
+    setOutputPages(prev => prev.map(p =>
+      p.id === pageId ? { ...p, annotations: p.annotations.filter(a => a.id !== annotId) } : p
+    ))
+
+  const handleDragStart = ({ active }) => { setActiveDragId(active.id); setActiveDragData(active.data.current ?? null) }
   const handleDragEnd = ({ active, over }) => {
-    setActiveDragId(null)
-    setActiveDragData(null)
+    setActiveDragId(null); setActiveDragData(null)
     if (!over) return
-
     const dragData = active.data.current
     if (dragData?.type === 'source-page') {
-      const droppedOnTray = over.id === 'output-tray' || outputPages.some(p => p.id === over.id)
-      if (droppedOnTray) addPage(dragData.pdf, dragData.page)
+      if (over.id === 'output-tray' || outputPages.some(p => p.id === over.id)) addPage(dragData.pdf, dragData.page)
       return
     }
-
     if (active.id === over.id) return
     setOutputPages(prev => {
       const from = prev.findIndex(p => p.id === active.id)
@@ -462,9 +665,7 @@ export default function App() {
     })
   }
 
-  const activeOutputPage = activeDragId && activeDragData?.type !== 'source-page'
-    ? outputPages.find(p => p.id === activeDragId)
-    : null
+  const activeOutputPage = activeDragId && activeDragData?.type !== 'source-page' ? outputPages.find(p => p.id === activeDragId) : null
   const activeSourceDrag = activeDragData?.type === 'source-page' ? activeDragData : null
   const isLoading = loadingNames.length > 0
 
@@ -478,30 +679,17 @@ export default function App() {
         </div>
         <div className="header-right">
           <div className="filename-wrap">
-            <input
-              className="filename-input"
-              value={filename}
-              onChange={e => setFilename(e.target.value)}
-              placeholder="assembled"
-              spellCheck={false}
-            />
+            <input className="filename-input" value={filename} onChange={e => setFilename(e.target.value)} placeholder="assembled" spellCheck={false} />
             <span className="filename-ext">.pdf</span>
           </div>
-          <button
-            className="btn-export"
-            onClick={exportPdf}
-            disabled={outputPages.length === 0}
-          >
+          <button className="btn-export" onClick={exportPdf} disabled={outputPages.length === 0}>
             Export{outputPages.length > 0 ? ` (${outputPages.length} pages)` : ' PDF'}
           </button>
         </div>
       </header>
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
+      <DndContext sensors={sensors} collisionDetection={closestCenter}
+        onDragStart={handleDragStart} onDragEnd={handleDragEnd}
         onDragCancel={() => { setActiveDragId(null); setActiveDragData(null) }}
       >
         <div className="app-body">
@@ -513,7 +701,6 @@ export default function App() {
               <button className="btn-add" onClick={() => fileInputRef.current?.click()}>+ Add PDFs</button>
               <input ref={fileInputRef} type="file" accept=".pdf" multiple hidden onChange={handleFileInput} />
             </div>
-
             <div
               className={`source-scroll${dragOver ? ' drag-over' : ''}`}
               onDragOver={e => { e.preventDefault(); setDragOver(true) }}
@@ -532,30 +719,19 @@ export default function App() {
                   <p className="drop-hint">or click + Add PDFs above</p>
                 </div>
               )}
-
               {isLoading && sourcePdfs.length === 0 && (
                 <div className="loading-state">
                   <div className="spinner" />
-                  <p>
-                    {loadingNames.length === 1
-                      ? `Loading ${loadingNames[0]}…`
-                      : `Loading ${loadingNames.length} files…`}
-                  </p>
+                  <p>{loadingNames.length === 1 ? `Loading ${loadingNames[0]}…` : `Loading ${loadingNames.length} files…`}</p>
                 </div>
               )}
-
               {sourcePdfs.map(pdf => {
                 const collapsed = collapsedPdfs.has(pdf.id)
                 const addedCount = pdf.pages.filter(p => addedSet.has(`${pdf.id}::${p.pageIndex}`)).length
                 return (
                   <div key={pdf.id} className={`source-file${collapsed ? ' is-collapsed' : ''}`}>
-                    <button
-                      className="source-file-label"
-                      onClick={() => toggleCollapse(pdf.id)}
-                      title={collapsed ? 'Expand' : 'Collapse'}
-                    >
-                      <svg className="file-chevron" width="10" height="10" viewBox="0 0 10 10"
-                        fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                    <button className="source-file-label" onClick={() => toggleCollapse(pdf.id)} title={collapsed ? 'Expand' : 'Collapse'}>
+                      <svg className="file-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                         <path d="M2 3.5L5 6.5L8 3.5" />
                       </svg>
                       <svg width="13" height="15" viewBox="0 0 13 15" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -563,21 +739,14 @@ export default function App() {
                         <path d="M8 1v4h3" strokeLinejoin="round" />
                       </svg>
                       <span title={pdf.name}>{pdf.name}</span>
-                      <span className="file-page-count">
-                        {addedCount > 0 ? `${addedCount}/` : ''}{pdf.pages.length}p
-                      </span>
+                      <span className="file-page-count">{addedCount > 0 ? `${addedCount}/` : ''}{pdf.pages.length}p</span>
                     </button>
                     {!collapsed && (
                       <div className="source-pages">
                         {pdf.pages.map(page => {
-                          const spid = `${pdf.id}::${page.pageIndex}`
-                          const isAdded = addedSet.has(spid)
+                          const isAdded = addedSet.has(`${pdf.id}::${page.pageIndex}`)
                           return (
-                            <DraggableSourceThumb
-                              key={page.id}
-                              pdf={pdf}
-                              page={page}
-                              isAdded={isAdded}
+                            <DraggableSourceThumb key={page.id} pdf={pdf} page={page} isAdded={isAdded}
                               onClick={() => setPreviewItem({ pdfId: pdf.id, pageIndex: page.pageIndex })}
                             />
                           )
@@ -595,13 +764,10 @@ export default function App() {
             <div className="panel-bar">
               <h2 className="panel-heading">Output Tray</h2>
               {outputPages.length > 0 && (
-                <>
-                  <span className="tray-count">{outputPages.length} page{outputPages.length !== 1 ? 's' : ''}</span>
-                  <button className="btn-clear" onClick={() => setOutputPages([])}>Clear all</button>
-                </>
+                <><span className="tray-count">{outputPages.length} page{outputPages.length !== 1 ? 's' : ''}</span>
+                <button className="btn-clear" onClick={() => setOutputPages([])}>Clear all</button></>
               )}
             </div>
-
             <SortableContext items={outputPages.map(p => p.id)} strategy={verticalListSortingStrategy}>
               <OutputDropZone hasCards={outputPages.length > 0}>
                 {outputPages.length === 0 && (
@@ -616,10 +782,7 @@ export default function App() {
                   </div>
                 )}
                 {outputPages.map(page => (
-                  <SortablePage
-                    key={page.id}
-                    page={page}
-                    onRemove={removePage}
+                  <SortablePage key={page.id} page={page} onRemove={removePage}
                     onPreview={(pdfId, pageIndex) => setPreviewItem({ pdfId, pageIndex })}
                   />
                 ))}
@@ -631,9 +794,7 @@ export default function App() {
         <DragOverlay dropAnimation={null}>
           {activeSourceDrag && (
             <div className="source-thumb-overlay">
-              {activeSourceDrag.page.thumbUrl
-                ? <img src={activeSourceDrag.page.thumbUrl} alt="" />
-                : <span className="thumb-err">?</span>}
+              {activeSourceDrag.page.thumbUrl ? <img src={activeSourceDrag.page.thumbUrl} alt="" /> : <span className="thumb-err">?</span>}
             </div>
           )}
           {activeOutputPage && (
@@ -658,12 +819,16 @@ export default function App() {
           addPage={addPage}
           onAddRedaction={addRedaction}
           onRemoveRedaction={removeRedaction}
+          onAddAnnotation={addAnnotation}
+          onUpdateAnnotation={updateAnnotation}
+          onRemoveAnnotation={removeAnnotation}
           onClose={() => setPreviewItem(null)}
         />
       )}
     </div>
   )
 
+  // ─── Export — burns all markings permanently into rasterized pages ──────────
   async function exportPdf() {
     if (!outputPages.length) return
     const out = await PDFDocument.create()
@@ -674,8 +839,12 @@ export default function App() {
       const src = sourcePdfs.find(p => p.id === op.sourceId)
       if (!src) continue
 
-      if (op.redactions && op.redactions.length > 0) {
-        // ── Redacted page: render to canvas, burn in black boxes, embed as image ──
+      const needsRaster = (op.redactions?.length > 0) || (op.annotations?.length > 0)
+
+      if (needsRaster) {
+        // Ensure signature font is loaded before we start drawing
+        if (op.annotations?.some(a => a.type === 'signature')) await ensureSignatureFont()
+
         if (!pdfJsCache[op.sourceId]) {
           const buf = src.bytes.buffer.slice(src.bytes.byteOffset, src.bytes.byteOffset + src.bytes.byteLength)
           pdfJsCache[op.sourceId] = await getDocument({ data: buf, wasmUrl }).promise
@@ -683,7 +852,6 @@ export default function App() {
         const pdfJsDoc = pdfJsCache[op.sourceId]
         const page = await pdfJsDoc.getPage(op.pageIndex + 1)
 
-        // Render at 2× for quality; native viewport gives us point dimensions
         const scale = 2
         const renderVp = page.getViewport({ scale })
         const nativeVp = page.getViewport({ scale: 1 })
@@ -691,20 +859,38 @@ export default function App() {
         const canvas = document.createElement('canvas')
         canvas.width = Math.ceil(renderVp.width)
         canvas.height = Math.ceil(renderVp.height)
-
-        // Pass canvas (not canvasContext) so PDF.js uses willReadFrequently
         await page.render({ canvas, viewport: renderVp }).promise
 
-        // Burn redactions into pixels — permanently overwrites content
         const ctx = canvas.getContext('2d')
+
+        // 1. Burn redactions
         ctx.fillStyle = '#000000'
-        for (const r of op.redactions) {
-          ctx.fillRect(
-            r.x * renderVp.width,
-            r.y * renderVp.height,
-            r.w * renderVp.width,
-            r.h * renderVp.height
-          )
+        for (const r of (op.redactions || [])) {
+          ctx.fillRect(r.x * renderVp.width, r.y * renderVp.height, r.w * renderVp.width, r.h * renderVp.height)
+        }
+
+        // 2. Draw text annotations
+        const fontScale = renderVp.width / PREVIEW_WIDTH
+        for (const a of (op.annotations || [])) {
+          if (a.type !== 'text' || !a.text.trim()) continue
+          const fs = Math.round(a.fontSize * fontScale)
+          const lh = Math.round(fs * 1.4)
+          ctx.font = `${fs}px Arial, Helvetica, sans-serif`
+          ctx.fillStyle = '#000000'
+          // Draw a subtle white background behind text for legibility
+          const maxW = a.w * renderVp.width
+          const px = a.x * renderVp.width
+          // Draw text (top of text box + 1 line-height for baseline)
+          canvasDrawText(ctx, a.text, px, a.y * renderVp.height + fs, maxW, lh)
+        }
+
+        // 3. Draw signature annotations
+        for (const a of (op.annotations || [])) {
+          if (a.type !== 'signature' || !a.text.trim() || a.inputMode) continue
+          const fs = Math.round(a.fontSize * fontScale)
+          ctx.font = `700 ${fs}px "Dancing Script", cursive`
+          ctx.fillStyle = '#1A1A2E'
+          ctx.fillText(a.text, a.x * renderVp.width, a.y * renderVp.height + fs)
         }
 
         const pngBytes = dataUrlToBytes(canvas.toDataURL('image/png'))
@@ -715,7 +901,7 @@ export default function App() {
         const newPage = out.addPage([nativeVp.width, nativeVp.height])
         newPage.drawImage(pngImage, { x: 0, y: 0, width: nativeVp.width, height: nativeVp.height })
       } else {
-        // ── Normal page: copy vectors/text intact ──
+        // Clean page — copy as vectors, preserving text and quality
         if (!pdfLibCache[op.sourceId]) {
           pdfLibCache[op.sourceId] = await PDFDocument.load(src.bytes)
         }

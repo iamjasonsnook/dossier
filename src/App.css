@@ -628,6 +628,251 @@ html, body, #root {
   background: var(--brand);
 }
 
+/* ── Modified badge on output card ── */
+.modified-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  background: #1A1A1A;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+/* ── Preview tool buttons ── */
+.preview-tools {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-tool {
+  height: 36px;
+  padding: 0 16px;
+  background: transparent;
+  color: var(--brand);
+  border: 1.5px solid var(--brand-border);
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s;
+  white-space: nowrap;
+}
+
+.btn-tool:hover { background: var(--brand-pale); border-color: var(--brand); }
+
+.btn-tool.is-active {
+  background: #1A1A1A;
+  color: #fff;
+  border-color: #1A1A1A;
+}
+
+.btn-tool.is-active:hover { background: #333; border-color: #333; }
+
+/* ── Annotation layer (overlay on preview image) ── */
+.preview-image-container {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
+.annotation-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none; /* transparent when no tool — annotations still clickable via CSS */
+}
+
+/* Activate whole overlay when a tool is selected */
+.annotation-layer.tool-redact,
+.annotation-layer.tool-text,
+.annotation-layer.tool-signature { pointer-events: all; }
+
+.annotation-layer.tool-redact   { cursor: crosshair; }
+.annotation-layer.tool-text     { cursor: cell; }
+.annotation-layer.tool-signature { cursor: crosshair; }
+
+/* ── Redaction boxes ── */
+.redaction-box {
+  position: absolute;
+  background: #000;
+  pointer-events: all; /* always clickable for ✕ */
+}
+
+.redaction-box.is-drawing {
+  opacity: 0.7;
+  outline: 1.5px dashed rgba(255,255,255,.5);
+  pointer-events: none;
+}
+
+.redaction-remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #DC2626;
+  color: #fff;
+  border: 2px solid #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,.3);
+}
+
+/* ── Text & Signature annotations ── */
+.annotation {
+  position: absolute;
+  pointer-events: all;
+}
+
+/* Text annotation */
+.text-annotation {
+  display: flex;
+  flex-direction: column;
+  min-width: 60px;
+}
+
+.annotation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--brand);
+  padding: 2px 4px 2px 6px;
+  border-radius: 3px 3px 0 0;
+  cursor: move;
+  user-select: none;
+  gap: 4px;
+}
+
+.annotation-type-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(255,255,255,.85);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  flex: 1;
+}
+
+.annotation-remove {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.2);
+  color: #fff;
+  border: none;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background .12s;
+}
+
+.annotation-remove:hover { background: rgba(220,38,38,.8); }
+
+.annotation-textarea {
+  width: 100%;
+  resize: none;
+  border: 2px solid var(--brand);
+  border-top: none;
+  border-radius: 0 0 3px 3px;
+  background: rgba(255,255,255,.95);
+  color: #1A1A1A;
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.4;
+  padding: 4px 6px;
+  outline: none;
+  overflow: hidden;
+  min-height: 28px;
+  box-sizing: border-box;
+}
+
+.annotation-textarea:focus { background: #fff; }
+
+.annotation-resize-handle {
+  position: absolute;
+  bottom: -2px;
+  right: -4px;
+  width: 12px;
+  height: 12px;
+  background: var(--brand);
+  border-radius: 2px;
+  cursor: se-resize;
+  opacity: 0.7;
+}
+
+.annotation-resize-handle:hover { opacity: 1; }
+
+/* Signature annotation — input phase */
+.signature-annotation.input-mode {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255,255,255,.95);
+  border: 2px solid var(--brand);
+  border-radius: 4px;
+  padding: 4px 6px;
+  min-width: 200px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+}
+
+.signature-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  font-family: var(--font);
+  color: #1A1A1A;
+  min-width: 160px;
+}
+
+.signature-input::placeholder { color: #9CA3AF; font-style: italic; }
+
+/* Signature annotation — rendered phase */
+.signature-annotation:not(.input-mode) {
+  cursor: move;
+  user-select: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding-bottom: 2px;
+  border-bottom: 1.5px solid rgba(26,26,46,.35);
+}
+
+.signature-text {
+  font-family: 'Dancing Script', cursive;
+  font-weight: 700;
+  color: #1A1A2E;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ── Tool hint bar ── */
+.tool-hint {
+  padding: 7px 18px;
+  background: #1A1A1A;
+  color: rgba(255,255,255,.72);
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: .15px;
+  flex-shrink: 0;
+}
+
 /* ── Output drop-zone highlight (cross-panel drag, empty tray) ── */
 .output-scroll.drop-over {
   background: #EDF4FF;
@@ -812,110 +1057,3 @@ html, body, #root {
   cursor: default;
 }
 
-.btn-redact {
-  height: 36px;
-  padding: 0 20px;
-  background: transparent;
-  color: var(--brand);
-  border: 1.5px solid var(--brand-border);
-  border-radius: var(--radius-pill);
-  font-size: 13px;
-  font-weight: 600;
-  font-family: var(--font);
-  cursor: pointer;
-  transition: background .15s, border-color .15s, color .15s;
-  letter-spacing: .1px;
-}
-
-.btn-redact:hover { background: var(--brand-pale); border-color: var(--brand); }
-
-.btn-redact.is-active {
-  background: #1A1A1A;
-  color: #fff;
-  border-color: #1A1A1A;
-}
-
-.btn-redact.is-active:hover { background: #333; border-color: #333; }
-
-/* ── Redaction drawing overlay ── */
-.preview-image-container {
-  position: relative;
-  display: inline-block;
-  line-height: 0;
-}
-
-.redaction-overlay {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.redaction-overlay.is-active {
-  pointer-events: all;
-  cursor: crosshair;
-}
-
-.redaction-box {
-  position: absolute;
-  background: #000;
-  pointer-events: none;
-}
-
-/* In redact mode, enable pointer events on boxes so ✕ is clickable */
-.redaction-overlay.is-active .redaction-box {
-  pointer-events: all;
-  cursor: default;
-}
-
-.redaction-box.is-drawing {
-  pointer-events: none;
-  opacity: 0.75;
-  outline: 1.5px dashed rgba(255,255,255,.5);
-}
-
-.redaction-remove {
-  position: absolute;
-  top: -10px;
-  right: -10px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #DC2626;
-  color: #fff;
-  border: 2px solid #fff;
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  box-shadow: 0 1px 4px rgba(0,0,0,.3);
-}
-
-/* ── Redact hint bar ── */
-.redact-hint {
-  padding: 8px 18px;
-  background: #1A1A1A;
-  color: rgba(255,255,255,.75);
-  font-size: 11px;
-  text-align: center;
-  letter-spacing: .2px;
-  flex-shrink: 0;
-}
-
-/* ── Redacted badge on output card ── */
-.redacted-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 6px;
-  background: #1A1A1A;
-  color: #fff;
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 3px;
-  letter-spacing: .3px;
-  text-transform: uppercase;
-  vertical-align: middle;
-}
