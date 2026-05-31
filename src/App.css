@@ -852,11 +852,7 @@ html, body, #root {
 
 /* Signature annotation — rendered phase */
 .signature-annotation:not(.input-mode) {
-  cursor: move;
   user-select: none;
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
 }
 
 .signature-text {
@@ -870,78 +866,23 @@ html, body, #root {
   display: block;
 }
 
-/* Hover toolbar — hidden until hover */
-.signature-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  margin-bottom: 3px;
-  opacity: 0;
-  transition: opacity .15s;
-  pointer-events: none;
-}
-
-.signature-annotation:not(.input-mode):hover .signature-toolbar {
-  opacity: 1;
-  pointer-events: all;
-}
-
-.sig-drag-hint {
-  font-size: 12px;
-  color: var(--text-muted);
-  cursor: move;
-  padding: 0 2px;
-  line-height: 1;
-}
-
-.sig-btn {
-  height: 20px;
-  padding: 0 7px;
-  background: var(--brand);
-  color: #fff;
-  border: none;
-  border-radius: 3px;
-  font-size: 10px;
+/* Edit button inside header */
+.sig-edit-btn {
+  background: transparent;
+  color: rgba(255,255,255,.75);
+  border: 1px solid rgba(255,255,255,.3);
+  border-radius: 2px;
+  font-size: 9px;
   font-weight: 600;
   font-family: var(--font);
+  padding: 1px 5px;
   cursor: pointer;
-  transition: background .12s;
+  transition: background .12s, color .12s;
   line-height: 1;
+  flex-shrink: 0;
 }
 
-.sig-btn:hover { background: var(--brand-dark); }
-
-.sig-btn-delete {
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 14px;
-  padding: 0 4px;
-}
-
-.sig-btn-delete:hover { color: #DC2626; background: #FEF2F2; }
-
-/* Right-edge resize handle */
-.signature-resize {
-  position: absolute;
-  right: -6px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 10px;
-  height: 28px;
-  border-radius: 3px;
-  background: var(--brand);
-  cursor: ew-resize;
-  opacity: 0;
-  transition: opacity .15s;
-}
-
-.signature-annotation:not(.input-mode):hover .signature-resize {
-  opacity: 0.6;
-}
-
-.signature-annotation:not(.input-mode):hover .signature-resize:hover {
-  opacity: 1;
-}
+.sig-edit-btn:hover { background: rgba(255,255,255,.2); color: #fff; }
 
 /* ── Tool hint bar ── */
 .tool-hint {

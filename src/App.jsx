@@ -196,9 +196,7 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
   const commitSignature = (raw) => {
     const text = raw.trim()
     if (!text) { onRemove(annotation.id); return }
-    // Estimate width: signature font is wide; ~0.028 per char is a reasonable heuristic
-    const w = Math.min(0.75, Math.max(0.18, text.length * 0.028))
-    onUpdate(annotation.id, { text, inputMode: false, w })
+    onUpdate(annotation.id, { text, inputMode: false })
   }
 
   const fontSize = Math.round(annotation.fontSize * (containerWidth / PREVIEW_WIDTH))
@@ -252,32 +250,31 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
     <div
       className="annotation signature-annotation"
       style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%` }}
-      onPointerDown={drag.onPointerDown}
-      onPointerMove={drag.onPointerMove}
-      onPointerUp={drag.onPointerUp}
     >
-      {/* Hover toolbar */}
-      <div className="signature-toolbar">
-        <span className="sig-drag-hint">⠿</span>
+      <div
+        className="annotation-header"
+        onPointerDown={drag.onPointerDown}
+        onPointerMove={drag.onPointerMove}
+        onPointerUp={drag.onPointerUp}
+      >
+        <span className="annotation-type-label">Signature</span>
         <button
-          className="sig-btn"
+          className="sig-edit-btn"
           onPointerDown={e => e.stopPropagation()}
           onClick={e => { e.stopPropagation(); onUpdate(annotation.id, { inputMode: true }) }}
           title="Edit signature text"
         >Edit</button>
         <button
-          className="sig-btn sig-btn-delete"
+          className="annotation-remove"
           onPointerDown={e => e.stopPropagation()}
           onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
-          title="Delete"
         >×</button>
       </div>
       <span className="signature-text" style={{ fontSize: `${fontSize}px` }}>
         {annotation.text}
       </span>
-      {/* Right-edge resize handle */}
       <div
-        className="signature-resize"
+        className="annotation-resize-handle"
         onPointerDown={onResizePointerDown}
         onPointerMove={onResizePointerMove}
         onPointerUp={onResizePointerUp}
