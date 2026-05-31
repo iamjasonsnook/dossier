@@ -747,7 +747,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: var(--brand);
+  background: rgba(155, 27, 93, 0.72);
   padding: 2px 4px 2px 6px;
   border-radius: 3px 3px 0 0;
   cursor: move;
@@ -787,10 +787,12 @@ html, body, #root {
 .annotation-textarea {
   width: 100%;
   resize: none;
-  border: 2px solid var(--brand);
+  border: 2px solid rgba(155, 27, 93, 0.72);
   border-top: none;
   border-radius: 0 0 3px 3px;
-  background: rgba(255,255,255,.95);
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   color: #1A1A1A;
   font-family: Arial, Helvetica, sans-serif;
   line-height: 1.4;
@@ -801,7 +803,10 @@ html, body, #root {
   box-sizing: border-box;
 }
 
-.annotation-textarea:focus { background: #fff; }
+.annotation-textarea:focus {
+  background: rgba(255, 255, 255, 0.75);
+  border-color: var(--brand);
+}
 
 .annotation-resize-handle {
   position: absolute;

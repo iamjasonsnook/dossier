@@ -215,9 +215,10 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
           defaultValue=""
           placeholder="Type name, press Enter"
           onPointerDown={e => e.stopPropagation()}
+          onBlur={e => commitSignature(e.target.value)}
           onKeyDown={e => {
             if (e.key === 'Enter') { e.preventDefault(); commitSignature(e.target.value) }
-            if (e.key === 'Escape') onRemove(annotation.id)
+            if (e.key === 'Escape') { e.preventDefault(); onRemove(annotation.id) }
           }}
         />
         <button
