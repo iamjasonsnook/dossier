@@ -738,8 +738,6 @@ html, body, #root {
 
 /* Text annotation */
 .text-annotation {
-  display: flex;
-  flex-direction: column;
   min-width: 60px;
 }
 
@@ -753,6 +751,11 @@ html, body, #root {
   cursor: move;
   user-select: none;
   gap: 4px;
+  /* Float the header above the annotation's y position so a.y = where text appears */
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
 }
 
 .annotation-type-label {
@@ -788,8 +791,7 @@ html, body, #root {
   width: 100%;
   resize: none;
   border: 2px solid rgba(155, 27, 93, 0.72);
-  border-top: none;
-  border-radius: 0 0 3px 3px;
+  border-radius: 3px;
   background: rgba(255, 255, 255, 0.55);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
