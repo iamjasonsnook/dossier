@@ -203,6 +203,24 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
 
   const fontSize = Math.round(annotation.fontSize * (containerWidth / PREVIEW_WIDTH))
 
+  const resizeDragRef = useRef(null)
+  const onResizePointerDown = (e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return
+    resizeDragRef.current = { sx: e.clientX / r.width, oSize: annotation.fontSize }
+  }
+  const onResizePointerMove = (e) => {
+    if (!resizeDragRef.current) return
+    const r = overlayRef.current?.getBoundingClientRect()
+    if (!r) return
+    const dx = e.clientX / r.width - resizeDragRef.current.sx
+    onUpdate(annotation.id, { fontSize: Math.max(18, Math.min(140, resizeDragRef.current.oSize + dx * 260)) })
+  }
+  const onResizePointerUp = () => { resizeDragRef.current = null }
+
   if (annotation.inputMode) {
     return (
       <div
@@ -212,7 +230,7 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
         <input
           ref={inputRef}
           className="signature-input"
-          defaultValue=""
+          defaultValue={annotation.text || ''}
           placeholder="Type name, press Enter"
           onPointerDown={e => e.stopPropagation()}
           onBlur={e => commitSignature(e.target.value)}
@@ -238,14 +256,33 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
       onPointerMove={drag.onPointerMove}
       onPointerUp={drag.onPointerUp}
     >
+      {/* Hover toolbar */}
+      <div className="signature-toolbar">
+        <span className="sig-drag-hint">⠿</span>
+        <button
+          className="sig-btn"
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); onUpdate(annotation.id, { inputMode: true }) }}
+          title="Edit signature text"
+        >Edit</button>
+        <button
+          className="sig-btn sig-btn-delete"
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
+          title="Delete"
+        >×</button>
+      </div>
       <span className="signature-text" style={{ fontSize: `${fontSize}px` }}>
         {annotation.text}
       </span>
-      <button
-        className="annotation-remove"
-        onPointerDown={e => e.stopPropagation()}
-        onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
-      >×</button>
+      {/* Right-edge resize handle */}
+      <div
+        className="signature-resize"
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+        title="Drag to resize"
+      />
     </div>
   )
 }
