@@ -20,6 +20,21 @@ const uid = () => `id-${++_uid}-${Math.random().toString(36).slice(2, 7)}`
 const wasmUrl = new URL('wasm/', window.location.href).href
 const PREVIEW_WIDTH = 900 // px width used by renderPreview — used to scale fonts at export
 
+// One font stack shared by the on-screen text box AND the export canvas, so
+// wrap points and glyph positions match exactly (fixes text shifting on export).
+const ANNOT_FONT = 'Helvetica, Arial, sans-serif'
+const ANNOT_LINE_RATIO = 1.4
+
+// Signature styles (loaded in index.html): three elegant scripts plus one clean
+// print style for people who prefer a plain typed signature.
+const SIGNATURE_FONTS = [
+  { id: 'alex', label: 'Alex Brush', css: "'Alex Brush', cursive" },
+  { id: 'vibes', label: 'Great Vibes', css: "'Great Vibes', cursive" },
+  { id: 'sacramento', label: 'Sacramento', css: "'Sacramento', cursive" },
+  { id: 'print', label: 'Print', css: "'Inter', sans-serif" },
+]
+const DEFAULT_SIG_FONT = SIGNATURE_FONTS[0].css
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function dataUrlToBytes(dataUrl) {
@@ -56,30 +71,37 @@ async function renderPreview(pdfBytes, pageIndex) {
   return renderThumb(page, PREVIEW_WIDTH)
 }
 
-// Ensure Dancing Script is ready in canvas context before drawing signatures
-async function ensureSignatureFont() {
-  try { await document.fonts.load('700 48px "Dancing Script"') } catch (_) {}
+// Ensure the signature script fonts are ready in the canvas before drawing.
+async function ensureSignatureFonts() {
+  try {
+    await Promise.all(SIGNATURE_FONTS.map(f =>
+      document.fonts.load(`48px ${f.css}`)
+    ))
+  } catch (_) {}
 }
 
-// Word-wrapped text for canvas — returns the final y position after drawing
-function canvasDrawText(ctx, text, x, y, maxWidth, lineHeight) {
-  let cy = y
+// Word-wrapped text for canvas, top-aligned to mirror a textarea with padding:0
+// and line-height 1.4 (glyphs vertically centered within each line box). Greedy
+// word wrap on spaces — the same algorithm browsers use — so lines break at the
+// same points as the on-screen box.
+function canvasDrawText(ctx, text, x, top, maxWidth, fontSize, lineHeight) {
+  ctx.textBaseline = 'top'
+  const leading = (lineHeight - fontSize) / 2 // matches the textarea's line-box centering
+  let lineIdx = 0
+  const drawLine = (line) => {
+    ctx.fillText(line, x, top + lineIdx * lineHeight + leading)
+    lineIdx++
+  }
   for (const para of text.split('\n')) {
-    if (!para.trim()) { cy += lineHeight; continue }
+    if (!para.trim()) { lineIdx++; continue }
     let line = ''
     for (const word of para.split(' ')) {
       const test = line ? `${line} ${word}` : word
-      if (ctx.measureText(test).width > maxWidth && line) {
-        ctx.fillText(line, x, cy)
-        line = word
-        cy += lineHeight
-      } else {
-        line = test
-      }
+      if (ctx.measureText(test).width > maxWidth && line) { drawLine(line); line = word }
+      else line = test
     }
-    if (line) { ctx.fillText(line, x, cy); cy += lineHeight }
+    if (line) drawLine(line)
   }
-  return cy
 }
 
 // ─── Drag-handle hook — shared by TextAnnotation and SignatureAnnotation ─────
@@ -143,31 +165,32 @@ function TextAnnotation({ annotation, overlayRef, containerWidth, onUpdate, onRe
   }
   const onResizePointerUp = () => { resizeRef.current = null }
 
-  const fontSize = Math.round(annotation.fontSize * (containerWidth / PREVIEW_WIDTH))
+  // Exact (unrounded) size keeps wrap points identical to export.
+  const fontSize = annotation.fontSize * (containerWidth / PREVIEW_WIDTH)
 
   return (
     <div
       className="annotation text-annotation"
       style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%`, width: `${annotation.w * 100}%` }}
     >
-      <div
-        className="annotation-header"
-        onPointerDown={drag.onPointerDown}
+      {/* Skinny drag grip on the left edge */}
+      <button
+        className="annot-side-grip" title="Drag to move"
+        onPointerDown={(e) => { e.stopPropagation(); drag.onPointerDown(e) }}
         onPointerMove={drag.onPointerMove}
         onPointerUp={drag.onPointerUp}
-      >
-        <span className="annotation-type-label">Text</span>
-        <button
-          className="annotation-remove"
-          onPointerDown={e => e.stopPropagation()}
-          onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
-        >×</button>
-      </div>
+      ><GripIcon /></button>
+      {/* Delete in the upper-right, opposite the resizer */}
+      <button
+        className="annot-corner-del" title="Delete"
+        onPointerDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
+      ><CloseIcon /></button>
       <textarea
         ref={textareaRef}
         className="annotation-textarea"
         value={annotation.text}
-        style={{ fontSize: `${fontSize}px` }}
+        style={{ fontFamily: ANNOT_FONT, fontSize: `${fontSize}px`, lineHeight: ANNOT_LINE_RATIO }}
         onChange={e => onUpdate(annotation.id, { text: e.target.value })}
         onPointerDown={e => e.stopPropagation()}
         placeholder="Type here…"
@@ -188,18 +211,21 @@ function TextAnnotation({ annotation, overlayRef, containerWidth, onUpdate, onRe
 function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate, onRemove }) {
   const drag = useDragHandle(overlayRef, annotation, onUpdate)
   const inputRef = useRef(null)
+  const [draft, setDraft] = useState(annotation.text || '')
 
   useEffect(() => {
     if (annotation.inputMode) inputRef.current?.focus()
   }, [annotation.inputMode])
 
-  const commitSignature = (raw) => {
-    const text = raw.trim()
+  const font = annotation.font || DEFAULT_SIG_FONT
+
+  const commit = () => {
+    const text = draft.trim()
     if (!text) { onRemove(annotation.id); return }
     onUpdate(annotation.id, { text, inputMode: false })
   }
 
-  const fontSize = Math.round(annotation.fontSize * (containerWidth / PREVIEW_WIDTH))
+  const fontSize = annotation.fontSize * (containerWidth / PREVIEW_WIDTH)
 
   const resizeDragRef = useRef(null)
   const onResizePointerDown = (e) => {
@@ -220,28 +246,43 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
   const onResizePointerUp = () => { resizeDragRef.current = null }
 
   if (annotation.inputMode) {
+    const preview = draft.trim() || 'Signature'
+    // Keep the popover inside the page: open leftward past the middle,
+    // and open upward in the lower part of the page.
+    const anchorRight = annotation.x > 0.5
+    const anchorUp = annotation.y > 0.45
     return (
       <div
-        className="annotation signature-annotation input-mode"
+        className={`annotation signature-annotation input-mode${anchorRight ? ' anchor-right' : ''}${anchorUp ? ' anchor-up' : ''}`}
         style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%` }}
+        onPointerDown={e => e.stopPropagation()}
       >
-        <input
-          ref={inputRef}
-          className="signature-input"
-          defaultValue={annotation.text || ''}
-          placeholder="Type name, press Enter"
-          onPointerDown={e => e.stopPropagation()}
-          onBlur={e => commitSignature(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === 'Enter') { e.preventDefault(); commitSignature(e.target.value) }
-            if (e.key === 'Escape') { e.preventDefault(); onRemove(annotation.id) }
-          }}
-        />
-        <button
-          className="annotation-remove"
-          onPointerDown={e => e.stopPropagation()}
-          onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
-        >×</button>
+        <div className="sig-input-row">
+          <input
+            ref={inputRef}
+            className="signature-input"
+            value={draft}
+            placeholder="Type your name"
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); commit() }
+              if (e.key === 'Escape') { e.preventDefault(); onRemove(annotation.id) }
+            }}
+          />
+          <button className="sig-add-btn" onClick={commit} disabled={!draft.trim()}>Add</button>
+        </div>
+        <div className="sig-style-label">Choose a style</div>
+        <div className="sig-style-row">
+          {SIGNATURE_FONTS.map(f => (
+            <button
+              key={f.id} type="button"
+              className={`sig-style${font === f.css ? ' is-active' : ''}`}
+              style={{ fontFamily: f.css }}
+              onClick={() => onUpdate(annotation.id, { font: f.css })}
+              title={f.label}
+            >{preview}</button>
+          ))}
+        </div>
       </div>
     )
   }
@@ -251,26 +292,24 @@ function SignatureAnnotation({ annotation, overlayRef, containerWidth, onUpdate,
       className="annotation signature-annotation"
       style={{ left: `${annotation.x * 100}%`, top: `${annotation.y * 100}%` }}
     >
-      <div
-        className="annotation-header"
-        onPointerDown={drag.onPointerDown}
+      {/* Skinny drag grip on the left edge */}
+      <button
+        className="annot-side-grip" title="Drag to move"
+        onPointerDown={(e) => { e.stopPropagation(); drag.onPointerDown(e) }}
         onPointerMove={drag.onPointerMove}
         onPointerUp={drag.onPointerUp}
+      ><GripIcon /></button>
+      {/* Delete in the upper-right, opposite the resizer */}
+      <button
+        className="annot-corner-del" title="Delete"
+        onPointerDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
+      ><CloseIcon /></button>
+      <span
+        className="signature-text" title="Click to edit"
+        style={{ fontFamily: font, fontSize: `${fontSize}px` }}
+        onClick={e => { e.stopPropagation(); setDraft(annotation.text || ''); onUpdate(annotation.id, { inputMode: true }) }}
       >
-        <span className="annotation-type-label">Signature</span>
-        <button
-          className="sig-edit-btn"
-          onPointerDown={e => e.stopPropagation()}
-          onClick={e => { e.stopPropagation(); onUpdate(annotation.id, { inputMode: true }) }}
-          title="Edit signature text"
-        >Edit</button>
-        <button
-          className="annotation-remove"
-          onPointerDown={e => e.stopPropagation()}
-          onClick={e => { e.stopPropagation(); onRemove(annotation.id) }}
-        >×</button>
-      </div>
-      <span className="signature-text" style={{ fontSize: `${fontSize}px` }}>
         {annotation.text}
       </span>
       <div
@@ -292,6 +331,39 @@ function GripIcon() {
       <circle cx="3.5" cy="2.5" r="1.3" /><circle cx="8.5" cy="2.5" r="1.3" />
       <circle cx="3.5" cy="7" r="1.3" /><circle cx="8.5" cy="7" r="1.3" />
       <circle cx="3.5" cy="11.5" r="1.3" /><circle cx="8.5" cy="11.5" r="1.3" />
+    </svg>
+  )
+}
+
+function CloseIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M3 3l6 6M9 3l-6 6" />
+    </svg>
+  )
+}
+
+// Tool icons for the preview toolbar
+function RedactIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <rect x="2.5" y="7.5" width="15" height="5" rx="1" fill="currentColor" />
+      <path d="M3 4h9M3 16h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity=".4" />
+    </svg>
+  )
+}
+function TextIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 5.5h12M10 5.5V15M7.5 15h5" />
+    </svg>
+  )
+}
+function SignatureIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2.5 13.5c2.5.3 3.8-1 4.4-3.2.5-2 .8-4.6 2-4.6 1 0 .8 2.2 1.5 2.2.6 0 1-1.2 1.9-1.2.8 0 .8 1.5 1.6 1.5.6 0 1-.6 1.6-.6" />
+      <path d="M2.5 16.5h15" opacity=".45" />
     </svg>
   )
 }
@@ -474,7 +546,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
       onAddAnnotation(outputPage.id, { id: uid(), type: 'text', x, y, w: 0.35, text: '', fontSize: 18 })
     }
     if (activeTool === 'signature') {
-      onAddAnnotation(outputPage.id, { id: uid(), type: 'signature', x, y, w: 0.3, text: '', fontSize: 52, inputMode: true })
+      onAddAnnotation(outputPage.id, { id: uid(), type: 'signature', x, y, w: 0.3, text: '', fontSize: 52, font: DEFAULT_SIG_FONT, inputMode: true })
     }
   }
 
@@ -492,11 +564,13 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
     addPage(pdf, currentPage)
   }
 
-  const toolHint = {
-    redact: 'Drag to draw a redaction box. Text beneath is permanently removed on export.',
-    text: 'Click anywhere on the page to place a text box.',
-    signature: 'Click where you want to sign, then type a name and press Enter.',
+  const toolMeta = {
+    redact: { label: 'Redact', Icon: RedactIcon, hint: 'Drag a box to permanently remove what is beneath it.' },
+    text: { label: 'Text', Icon: TextIcon, hint: 'Click the page to drop a text box, then type.' },
+    signature: { label: 'Signature', Icon: SignatureIcon, hint: 'Click to place your signature, then type your name.' },
   }
+  const toolCount = (tool) =>
+    tool === 'redact' ? redactions.length : annotations.filter(a => a.type === tool).length
 
   return (
     <div className="preview-overlay" onClick={onClose}>
@@ -505,7 +579,42 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
         <div className="preview-header">
           <span className="preview-filename" title={pdf?.name}>{pdf?.name}</span>
           <span className="preview-page-info">Page {currentIndex + 1} of {totalPages}</span>
-          <button className="preview-close" onClick={onClose} title="Close (Esc)">×</button>
+          <button className="preview-close" onClick={onClose} title="Close (Esc)"><CloseIcon /></button>
+        </div>
+
+        {/* App-style tool ribbon */}
+        <div className="preview-toolbar">
+          <div className="ptb-group">
+            {currentIsAdded ? (
+              <span className="ptb-intray" title="This page is in your export tray">✓ In tray</span>
+            ) : (
+              <button className="ptb-add" onClick={handleAdd}>+ Add to tray</button>
+            )}
+          </div>
+
+          <div className="ptb-divider" />
+
+          <div className="ptb-group ptb-tools">
+            {['redact', 'text', 'signature'].map(tool => {
+              const { label, Icon, hint } = toolMeta[tool]
+              const count = toolCount(tool)
+              return (
+                <button
+                  key={tool}
+                  className={`ptb-tool${activeTool === tool ? ' is-active' : ''}`}
+                  onClick={() => toggleTool(tool)}
+                  disabled={!currentIsAdded}
+                  title={currentIsAdded ? hint : 'Add this page to the tray to annotate it'}
+                >
+                  <Icon />
+                  <span className="ptb-tool-label">{label}</span>
+                  {count > 0 && <span className="ptb-badge">{count}</span>}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="ptb-hint">{activeTool ? toolMeta[activeTool].hint : ''}</div>
         </div>
 
         <div className="preview-body">
@@ -566,36 +675,6 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
           )}
         </div>
 
-        <div className="preview-footer">
-          <button
-            className={`btn-add-preview${currentIsAdded ? ' is-added' : ''}`}
-            onClick={handleAdd} disabled={currentIsAdded}
-          >
-            {currentIsAdded ? '✓ In Tray' : '+ Add to Tray'}
-          </button>
-
-          {currentIsAdded && outputPage && (
-            <div className="preview-tools">
-              {['redact', 'text', 'signature'].map(tool => (
-                <button
-                  key={tool}
-                  className={`btn-tool${activeTool === tool ? ' is-active' : ''}`}
-                  onClick={() => toggleTool(tool)}
-                  title={toolHint[tool]}
-                >
-                  {{ redact: 'Redact', text: 'Text', signature: 'Signature' }[tool]}
-                  {tool === 'redact' && redactions.length > 0 && ` (${redactions.length})`}
-                  {tool !== 'redact' && annotations.filter(a => a.type === tool).length > 0 &&
-                    ` (${annotations.filter(a => a.type === tool).length})`}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {activeTool && (
-          <div className="tool-hint">{toolHint[activeTool]}</div>
-        )}
       </div>
     </div>
   )
@@ -708,7 +787,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-brand">
-          <img src={`${import.meta.env.BASE_URL}logo-white.svg`} alt="SupportWorks Housing" className="swh-logo" />
+          <img src={`${import.meta.env.BASE_URL}logo-ful.png`} alt="SupportWorks Housing" className="swh-logo" />
           <div className="brand-divider" />
           <span className="brand-name">Dossier</span>
         </div>
@@ -877,8 +956,8 @@ export default function App() {
       const needsRaster = (op.redactions?.length > 0) || (op.annotations?.length > 0)
 
       if (needsRaster) {
-        // Ensure signature font is loaded before we start drawing
-        if (op.annotations?.some(a => a.type === 'signature')) await ensureSignatureFont()
+        // Ensure signature fonts are loaded before we start drawing
+        if (op.annotations?.some(a => a.type === 'signature')) await ensureSignatureFonts()
 
         if (!pdfJsCache[op.sourceId]) {
           const buf = src.bytes.buffer.slice(src.bytes.byteOffset, src.bytes.byteOffset + src.bytes.byteLength)
@@ -904,28 +983,29 @@ export default function App() {
           ctx.fillRect(r.x * renderVp.width, r.y * renderVp.height, r.w * renderVp.width, r.h * renderVp.height)
         }
 
-        // 2. Draw text annotations
+        // 2. Draw text annotations — same font/line-height/top-baseline as the
+        //    on-screen box (padding 0) so wrap points and position match exactly.
         const fontScale = renderVp.width / PREVIEW_WIDTH
         for (const a of (op.annotations || [])) {
           if (a.type !== 'text' || !a.text.trim()) continue
-          const fs = Math.round(a.fontSize * fontScale)
-          const lh = Math.round(fs * 1.4)
-          ctx.font = `${fs}px Arial, Helvetica, sans-serif`
-          ctx.fillStyle = '#000000'
-          // Draw a subtle white background behind text for legibility
+          const fs = a.fontSize * fontScale
+          const lh = fs * ANNOT_LINE_RATIO
+          ctx.font = `${fs}px ${ANNOT_FONT}`
+          ctx.fillStyle = '#1A1A1A'
           const maxW = a.w * renderVp.width
           const px = a.x * renderVp.width
-          // Draw text (top of text box + 1 line-height for baseline)
-          canvasDrawText(ctx, a.text, px, a.y * renderVp.height + fs, maxW, lh)
+          const top = a.y * renderVp.height
+          canvasDrawText(ctx, a.text, px, top, maxW, fs, lh)
         }
 
-        // 3. Draw signature annotations
+        // 3. Draw signature annotations in the chosen script font
         for (const a of (op.annotations || [])) {
           if (a.type !== 'signature' || !a.text.trim() || a.inputMode) continue
-          const fs = Math.round(a.fontSize * fontScale)
-          ctx.font = `700 ${fs}px "Dancing Script", cursive`
+          const fs = a.fontSize * fontScale
+          ctx.font = `${fs}px ${a.font || DEFAULT_SIG_FONT}`
           ctx.fillStyle = '#1A1A2E'
-          ctx.fillText(a.text, a.x * renderVp.width, a.y * renderVp.height + fs)
+          ctx.textBaseline = 'top'
+          ctx.fillText(a.text, a.x * renderVp.width, a.y * renderVp.height)
         }
 
         const pngBytes = dataUrlToBytes(canvas.toDataURL('image/png'))
