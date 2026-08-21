@@ -565,16 +565,21 @@ html, body, #root {
 /* Square, so the image still fits after a quarter turn and the card keeps
    its height whichever way the page is facing. */
 .output-card-thumb-wrap {
-  width: 54px;
-  height: 54px;
+  --thumb-box: 54px;
+  width: var(--thumb-box);
+  height: var(--thumb-box);
   flex-shrink: 0;
   display: grid;
   place-items: center;
+  overflow: hidden;
 }
 
 .output-card-thumb {
-  max-width: 100%;
-  max-height: 100%;
+  /* Capped in px, not 100%: a percentage max-height resolved against an
+     auto-sized grid row is circular, so the browser drops it and a portrait
+     page overflows the box at its natural height. */
+  max-width: var(--thumb-box);
+  max-height: var(--thumb-box);
   border-radius: 4px;
   border: 1px solid var(--card-border);
   display: block;
@@ -824,12 +829,53 @@ html, body, #root {
 
 /* Activate whole overlay when a tool is selected */
 .annotation-layer.tool-redact,
+.annotation-layer.tool-highlight,
 .annotation-layer.tool-text,
 .annotation-layer.tool-signature { pointer-events: all; }
 
 .annotation-layer.tool-redact   { cursor: crosshair; }
+/* Crosshair, not text: highlighting is a box drag like redaction, and an
+   I-beam promised a text selection the tool does not do. */
+.annotation-layer.tool-highlight { cursor: crosshair; }
 .annotation-layer.tool-text     { cursor: cell; }
 .annotation-layer.tool-signature { cursor: crosshair; }
+
+/* ── Highlights ── */
+/* multiply matches how the export burns these in, so the text underneath
+   stays black on screen instead of being washed out. */
+.highlight-box {
+  position: absolute;
+  background: #FDE767;
+  mix-blend-mode: multiply;
+  pointer-events: all; /* always clickable for ✕ */
+  border-radius: 1px;
+}
+
+.highlight-box.is-drawing {
+  outline: 1.5px dashed rgba(0,0,0,.35);
+  pointer-events: none;
+}
+
+.highlight-remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #DC2626;
+  color: #fff;
+  border: 2px solid #fff;
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  /* The parent multiplies; the button must not, or it turns muddy. */
+  mix-blend-mode: normal;
+}
 
 /* ── Redaction boxes ── */
 .redaction-box {

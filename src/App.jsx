@@ -37,6 +37,13 @@ const DEFAULT_SIG_FONT = SIGNATURE_FONTS[0].css
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// Highlighter yellow. Painted with a multiply blend so the text underneath
+// stays black and crisp instead of being veiled by a translucent layer.
+const HIGHLIGHT_FILL = '#FDE767'
+
+/** Tools drawn by dragging a box, as opposed to placed with a single click. */
+const isBoxTool = (tool) => tool === 'redact' || tool === 'highlight'
+
 /** Rotation is stored per output page as a clockwise delta on the page's own /Rotate. */
 const normalizeRotation = (deg) => ((deg % 360) + 360) % 360
 
@@ -400,6 +407,18 @@ function SignatureIcon() {
   )
 }
 
+function HighlightIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+    >
+      {/* Marker nib over a swept stroke */}
+      <path d="M9.5 2.5l4 4-5.5 5.5H4.5v-3.5z" />
+      <path d="M2.5 14.5h11" />
+    </svg>
+  )
+}
+
 function RotateIcon({ ccw = false }) {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
@@ -414,7 +433,7 @@ function RotateIcon({ ccw = false }) {
 
 function SortablePage({ page, onRemove, onRotate, onPreview }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: page.id })
-  const modCount = (page.redactions?.length || 0) + (page.annotations?.length || 0)
+  const modCount = (page.redactions?.length || 0) + (page.highlights?.length || 0) + (page.annotations?.length || 0)
   const rotation = normalizeRotation(page.rotation || 0)
   return (
     <div
@@ -480,7 +499,7 @@ function OutputDropZone({ children, hasCards }) {
 
 // ─── PagePreview ──────────────────────────────────────────────────────────────
 
-function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRedaction, onRemoveRedaction, onAddAnnotation, onUpdateAnnotation, onRemoveAnnotation, onClose }) {
+function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRedaction, onRemoveRedaction, onAddHighlight, onRemoveHighlight, onAddAnnotation, onUpdateAnnotation, onRemoveAnnotation, onClose }) {
   const pdf = sourcePdfs.find(p => p.id === item.pdfId)
   const [currentIndex, setCurrentIndex] = useState(item.pageIndex)
   const [render, setRender] = useState({ token: null, url: null })
@@ -500,6 +519,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
   const currentPage = pdf?.pages.find(p => p.pageIndex === currentIndex)
   const outputPage = outputPages.find(p => p.sourceId === item.pdfId && p.pageIndex === currentIndex)
   const redactions = outputPage?.redactions || []
+  const highlights = outputPage?.highlights || []
   const annotations = outputPage?.annotations || []
   const rotation = normalizeRotation(outputPage?.rotation || 0)
   const activeTool = tool.page === currentIndex ? tool.name : null
@@ -564,12 +584,12 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
   // ── Overlay pointer handlers ─────────────────────────────────────────────
 
   const onOverlayPointerDown = (e) => {
-    // Clicks on annotations or redaction elements are handled by those elements
-    if (e.target.closest('.annotation, .redaction-box')) return
+    // Clicks on annotations or existing boxes are handled by those elements
+    if (e.target.closest('.annotation, .redaction-box, .highlight-box')) return
 
     pointerDownPos.current = { x: e.clientX, y: e.clientY }
 
-    if (activeTool === 'redact') {
+    if (isBoxTool(activeTool)) {
       e.preventDefault()
       const { x, y } = normCoords(e)
       setDrawingRect({ sx: x, sy: y, cx: x, cy: y })
@@ -578,20 +598,25 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
   }
 
   const onOverlayPointerMove = (e) => {
-    if (activeTool === 'redact' && drawingRect) {
+    if (isBoxTool(activeTool) && drawingRect) {
       const { x, y } = normCoords(e)
       setDrawingRect({ ...drawingRect, cx: x, cy: y })
     }
   }
 
   const onOverlayPointerUp = (e) => {
-    if (activeTool === 'redact' && drawingRect) {
+    if (isBoxTool(activeTool) && drawingRect) {
       const minX = Math.min(drawingRect.sx, drawingRect.cx)
       const minY = Math.min(drawingRect.sy, drawingRect.cy)
       const w = Math.abs(drawingRect.cx - drawingRect.sx)
       const h = Math.abs(drawingRect.cy - drawingRect.sy)
-      if (outputPage && w > 0.01 && h > 0.01) {
-        onAddRedaction(outputPage.id, { x: minX, y: minY, w, h })
+      // A highlight is a line of text, so it can be far shallower than a
+      // redaction before it stops being a deliberate drag.
+      const minH = activeTool === 'highlight' ? 0.004 : 0.01
+      if (outputPage && w > 0.01 && h > minH) {
+        const rect = { x: minX, y: minY, w, h }
+        if (activeTool === 'highlight') onAddHighlight(outputPage.id, rect)
+        else onAddRedaction(outputPage.id, rect)
       }
       setDrawingRect(null)
       return
@@ -607,6 +632,9 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
 
     if (activeTool === 'text') {
       onAddAnnotation(outputPage.id, { id: uid(), type: 'text', x, y, w: 0.35, text: '', fontSize: 18 })
+      // One box per click of the tool. The new box takes focus for typing, so
+      // leaving the tool armed only invites stray boxes from the next click.
+      setActiveTool(null)
     }
     if (activeTool === 'signature') {
       onAddAnnotation(outputPage.id, { id: uid(), type: 'signature', x, y, w: 0.3, text: '', fontSize: 52, font: DEFAULT_SIG_FONT, inputMode: true })
@@ -629,11 +657,14 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
 
   const toolMeta = {
     redact: { label: 'Redact', Icon: RedactIcon, hint: 'Drag a box to permanently remove what is beneath it.' },
-    text: { label: 'Text', Icon: TextIcon, hint: 'Click the page to drop a text box, then type.' },
+    highlight: { label: 'Highlight', Icon: HighlightIcon, hint: 'Drag across a line of text to highlight it. Stays on for multiple lines.' },
+    text: { label: 'Text', Icon: TextIcon, hint: 'Click the page to drop a single text box, then type.' },
     signature: { label: 'Signature', Icon: SignatureIcon, hint: 'Click to place your signature, then type your name.' },
   }
   const toolCount = (name) =>
-    name === 'redact' ? redactions.length : annotations.filter(a => a.type === name).length
+    name === 'redact' ? redactions.length
+      : name === 'highlight' ? highlights.length
+        : annotations.filter(a => a.type === name).length
 
   return (
     <div className="preview-overlay" onClick={onClose}>
@@ -658,7 +689,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
           <div className="ptb-divider" />
 
           <div className="ptb-group ptb-tools">
-            {['redact', 'text', 'signature'].map(name => {
+            {['redact', 'highlight', 'text', 'signature'].map(name => {
               const { label, Icon, hint } = toolMeta[name]
               const count = toolCount(name)
               return (
@@ -718,6 +749,21 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
                   onPointerMove={onOverlayPointerMove}
                   onPointerUp={onOverlayPointerUp}
                 >
+                  {/* Highlights first, so they sit beneath the rest the way a
+                      marker goes under a pen. */}
+                  {highlights.map((h, i) => (
+                    <div key={i} className="highlight-box"
+                      style={{ left: `${h.x * 100}%`, top: `${h.y * 100}%`, width: `${h.w * 100}%`, height: `${h.h * 100}%` }}
+                    >
+                      {activeTool === 'highlight' && outputPage && (
+                        <button className="highlight-remove"
+                          onPointerDown={e => { e.stopPropagation(); e.preventDefault() }}
+                          onClick={e => { e.stopPropagation(); onRemoveHighlight(outputPage.id, i) }}
+                        >×</button>
+                      )}
+                    </div>
+                  ))}
+
                   {/* Redaction boxes */}
                   {redactions.map((r, i) => (
                     <div key={i} className="redaction-box"
@@ -731,7 +777,13 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
                       )}
                     </div>
                   ))}
-                  {drawingStyle && <div className="redaction-box is-drawing" style={drawingStyle} />}
+
+                  {drawingStyle && (
+                    <div
+                      className={`${activeTool === 'highlight' ? 'highlight-box' : 'redaction-box'} is-drawing`}
+                      style={drawingStyle}
+                    />
+                  )}
 
                   {/* Annotations */}
                   {annotations.map(a => a.type === 'text' ? (
@@ -817,11 +869,33 @@ export default function App() {
     setOutputPages(prev => [...prev, {
       id: uid(), sourcePageId, sourceId: pdf.id,
       pageIndex: page.pageIndex, sourceName: pdf.name.replace(/\.pdf$/i, ''),
-      thumbUrl: page.thumbUrl, rotation: 0, redactions: [], annotations: [],
+      thumbUrl: page.thumbUrl, rotation: 0, redactions: [], highlights: [], annotations: [],
     }])
   }
 
   const removePage = (id) => setOutputPages(prev => prev.filter(p => p.id !== id))
+
+  /**
+   * Clear the source list. Tray pages are drawn from these files and hold no
+   * bytes of their own, so they cannot outlive them: an orphaned page would be
+   * skipped at export and quietly go missing from the PDF. Both lists go
+   * together, with a warning first if that means discarding real work.
+   */
+  const clearSources = () => {
+    if (outputPages.length > 0) {
+      const n = outputPages.length
+      const marks = outputPages.reduce((sum, p) =>
+        sum + (p.redactions?.length || 0) + (p.highlights?.length || 0) + (p.annotations?.length || 0), 0)
+      const detail = marks > 0 ? `, including ${marks} mark${marks !== 1 ? 's' : ''}` : ''
+      if (!window.confirm(
+        `Removing every source PDF also empties your output tray of ${n} page${n !== 1 ? 's' : ''}${detail}.\n\nContinue?`
+      )) return
+    }
+    setSourcePdfs([])
+    setOutputPages([])
+    setCollapsedPdfs(new Set())
+    setPreviewItem(null)
+  }
 
   /**
    * Turn one tray page by a quarter, carrying its marks around with it. Doing
@@ -833,6 +907,7 @@ export default function App() {
       ...p,
       rotation: normalizeRotation((p.rotation || 0) + delta),
       redactions: p.redactions.map(r => rotateFractionalRect(r, delta)),
+      highlights: (p.highlights || []).map(h => rotateFractionalRect(h, delta)),
       annotations: p.annotations.map(a => {
         const { x, y } = rotateFractionalRect({ x: a.x, y: a.y, w: a.w || 0, h: 0 }, delta)
         return { ...a, x, y }
@@ -848,6 +923,14 @@ export default function App() {
     setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, redactions: [...p.redactions, rect] } : p))
   const removeRedaction = (pageId, index) =>
     setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, redactions: p.redactions.filter((_, i) => i !== index) } : p))
+
+  // Highlight management. Kept separate from redactions: both are dragged
+  // rectangles, but one hides what is beneath it and the other draws attention
+  // to it, and export treats them very differently.
+  const addHighlight = (pageId, rect) =>
+    setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, highlights: [...(p.highlights || []), rect] } : p))
+  const removeHighlight = (pageId, index) =>
+    setOutputPages(prev => prev.map(p => p.id === pageId ? { ...p, highlights: (p.highlights || []).filter((_, i) => i !== index) } : p))
 
   // Annotation management
   const addAnnotation = (pageId, annotation) =>
@@ -911,6 +994,10 @@ export default function App() {
             <div className="panel-bar">
               <h2 className="panel-heading">Source PDFs</h2>
               {isLoading && <span className="loading-badge"><span className="spinner-inline" />Rendering…</span>}
+              {sourcePdfs.length > 0 && (
+                <><span className="tray-count">{sourcePdfs.length} file{sourcePdfs.length !== 1 ? 's' : ''}</span>
+                <button className="btn-clear" onClick={clearSources}>Clear all</button></>
+              )}
               <button className="btn-add" onClick={() => fileInputRef.current?.click()}>+ Add PDFs</button>
               <input ref={fileInputRef} type="file" accept=".pdf" multiple hidden onChange={handleFileInput} />
             </div>
@@ -1037,6 +1124,8 @@ export default function App() {
           onRotate={rotatePage}
           onAddRedaction={addRedaction}
           onRemoveRedaction={removeRedaction}
+          onAddHighlight={addHighlight}
+          onRemoveHighlight={removeHighlight}
           onAddAnnotation={addAnnotation}
           onUpdateAnnotation={updateAnnotation}
           onRemoveAnnotation={removeAnnotation}
@@ -1057,7 +1146,7 @@ export default function App() {
       const src = sourcePdfs.find(p => p.id === op.sourceId)
       if (!src) continue
 
-      const needsRaster = (op.redactions?.length > 0) || (op.annotations?.length > 0)
+      const needsRaster = (op.redactions?.length > 0) || (op.highlights?.length > 0) || (op.annotations?.length > 0)
       const rotation = normalizeRotation(op.rotation || 0)
 
       if (needsRaster) {
@@ -1085,13 +1174,27 @@ export default function App() {
 
         const ctx = canvas.getContext('2d')
 
-        // 1. Burn redactions
+        // 1. Highlights, under everything else. A multiply blend is what makes
+        //    this read as a marker: yellow over white gives yellow, yellow over
+        //    black text leaves the text black, so nothing is obscured. Plain
+        //    alpha would instead veil the whole line.
+        if (op.highlights?.length) {
+          ctx.save()
+          ctx.globalCompositeOperation = 'multiply'
+          ctx.fillStyle = HIGHLIGHT_FILL
+          for (const h of op.highlights) {
+            ctx.fillRect(h.x * renderVp.width, h.y * renderVp.height, h.w * renderVp.width, h.h * renderVp.height)
+          }
+          ctx.restore()
+        }
+
+        // 2. Burn redactions
         ctx.fillStyle = '#000000'
         for (const r of (op.redactions || [])) {
           ctx.fillRect(r.x * renderVp.width, r.y * renderVp.height, r.w * renderVp.width, r.h * renderVp.height)
         }
 
-        // 2. Draw text annotations — same font/line-height/top-baseline as the
+        // 3. Draw text annotations — same font/line-height/top-baseline as the
         //    on-screen box (padding 0) so wrap points and position match exactly.
         const fontScale = renderVp.width / PREVIEW_WIDTH
         for (const a of (op.annotations || [])) {
@@ -1106,7 +1209,7 @@ export default function App() {
           canvasDrawText(ctx, a.text, px, top, maxW, fs, lh)
         }
 
-        // 3. Draw signature annotations in the chosen script font
+        // 4. Draw signature annotations in the chosen script font
         for (const a of (op.annotations || [])) {
           if (a.type !== 'signature' || !a.text.trim() || a.inputMode) continue
           const fs = a.fontSize * fontScale
