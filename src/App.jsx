@@ -103,7 +103,10 @@ async function ensureSignatureFonts() {
     await Promise.all(SIGNATURE_FONTS.map(f =>
       document.fonts.load(`48px ${f.css}`)
     ))
-  } catch (_) {}
+  } catch {
+    // Best effort: if a script font fails to load, canvas falls back to a
+    // default face rather than the export failing outright.
+  }
 }
 
 // Word-wrapped text for canvas, top-aligned to mirror a textarea with padding:0
@@ -171,8 +174,11 @@ function TextAnnotation({ annotation, overlayRef, containerWidth, onUpdate, onRe
     ta.style.height = `${ta.scrollHeight}px`
   }, [annotation.text])
 
-  // Focus on creation
-  useEffect(() => { if (annotation.text === '') textareaRef.current?.focus() }, [])
+  // Focus on creation only. Reading "was it empty?" from a ref keeps this
+  // mount-only on purpose: it should grab focus for a freshly placed box and
+  // never snatch it back later while the user is typing elsewhere.
+  const createdEmpty = useRef(annotation.text === '')
+  useEffect(() => { if (createdEmpty.current) textareaRef.current?.focus() }, [])
 
   const onResizePointerDown = (e) => {
     e.stopPropagation()
@@ -477,10 +483,12 @@ function OutputDropZone({ children, hasCards }) {
 function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRedaction, onRemoveRedaction, onAddAnnotation, onUpdateAnnotation, onRemoveAnnotation, onClose }) {
   const pdf = sourcePdfs.find(p => p.id === item.pdfId)
   const [currentIndex, setCurrentIndex] = useState(item.pageIndex)
-  const [previewUrl, setPreviewUrl] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [activeTool, setActiveTool] = useState(null) // null | 'redact' | 'text' | 'signature'
-  const [drawingRect, setDrawingRect] = useState(null)
+  const [render, setRender] = useState({ token: null, url: null })
+  // Tool selection and any in-progress box belong to the page on screen, so
+  // both are tagged with it. Navigating away drops them during render, which
+  // is why neither needs an effect chasing currentIndex.
+  const [tool, setTool] = useState({ page: item.pageIndex, name: null }) // null | 'redact' | 'text' | 'signature'
+  const [draw, setDraw] = useState({ page: item.pageIndex, rect: null })
   const [containerWidth, setContainerWidth] = useState(PREVIEW_WIDTH)
   const overlayRef = useRef(null)
   const pointerDownPos = useRef(null)
@@ -494,24 +502,31 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
   const redactions = outputPage?.redactions || []
   const annotations = outputPage?.annotations || []
   const rotation = normalizeRotation(outputPage?.rotation || 0)
+  const activeTool = tool.page === currentIndex ? tool.name : null
+  const drawingRect = draw.page === currentIndex ? draw.rect : null
+  // Stable across renders so the keyboard listener below is not torn down and
+  // rebuilt on every one.
+  const setActiveTool = useCallback((name) => setTool({ page: currentIndex, name }), [currentIndex])
+  const setDrawingRect = useCallback((rect) => setDraw({ page: currentIndex, rect }), [currentIndex])
 
-  // Render high-res preview, already rotated so the overlay lines up with it
+  // Render high-res preview, already rotated so the overlay lines up with it.
+  // The result is tagged with the page and rotation it was rendered for, so
+  // "still loading" is derived rather than reset by the effect: changing page
+  // or rotation invalidates the old image during render instead of leaving it
+  // on screen for a frame.
+  const renderToken = `${pdf?.id ?? ''}|${currentIndex}|${rotation}`
+  const loading = render.token !== renderToken
+  const previewUrl = loading ? null : render.url
+
   useEffect(() => {
     if (!pdf?.bytes) return
     let cancelled = false
-    setLoading(true)
-    setPreviewUrl(null)
     renderPreview(pdf.bytes, currentIndex, rotation)
-      .then(url => { if (!cancelled) { setPreviewUrl(url); setLoading(false) } })
-      .catch(() => { if (!cancelled) setLoading(false) })
+      .then(url => { if (!cancelled) setRender({ token: renderToken, url }) })
+      // A page that will not render shows as blank rather than spinning forever.
+      .catch(() => { if (!cancelled) setRender({ token: renderToken, url: null }) })
     return () => { cancelled = true }
-  }, [pdf, currentIndex, rotation])
-
-  // Reset tool when navigating pages
-  useEffect(() => {
-    setActiveTool(null)
-    setDrawingRect(null)
-  }, [currentIndex])
+  }, [pdf, currentIndex, rotation, renderToken])
 
   // Track overlay width for proportional font sizing
   useEffect(() => {
@@ -534,7 +549,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [currentIndex, totalPages, activeTool, onClose])
+  }, [currentIndex, totalPages, activeTool, onClose, setActiveTool])
 
   // Normalized coords from pointer event relative to overlay
   const normCoords = (e) => {
@@ -565,7 +580,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
   const onOverlayPointerMove = (e) => {
     if (activeTool === 'redact' && drawingRect) {
       const { x, y } = normCoords(e)
-      setDrawingRect(r => ({ ...r, cx: x, cy: y }))
+      setDrawingRect({ ...drawingRect, cx: x, cy: y })
     }
   }
 
@@ -598,7 +613,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
     }
   }
 
-  const toggleTool = (tool) => setActiveTool(t => t === tool ? null : tool)
+  const toggleTool = (name) => setActiveTool(activeTool === name ? null : name)
 
   const drawingStyle = drawingRect ? {
     left: `${Math.min(drawingRect.sx, drawingRect.cx) * 100}%`,
@@ -617,8 +632,8 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
     text: { label: 'Text', Icon: TextIcon, hint: 'Click the page to drop a text box, then type.' },
     signature: { label: 'Signature', Icon: SignatureIcon, hint: 'Click to place your signature, then type your name.' },
   }
-  const toolCount = (tool) =>
-    tool === 'redact' ? redactions.length : annotations.filter(a => a.type === tool).length
+  const toolCount = (name) =>
+    name === 'redact' ? redactions.length : annotations.filter(a => a.type === name).length
 
   return (
     <div className="preview-overlay" onClick={onClose}>
@@ -643,14 +658,14 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
           <div className="ptb-divider" />
 
           <div className="ptb-group ptb-tools">
-            {['redact', 'text', 'signature'].map(tool => {
-              const { label, Icon, hint } = toolMeta[tool]
-              const count = toolCount(tool)
+            {['redact', 'text', 'signature'].map(name => {
+              const { label, Icon, hint } = toolMeta[name]
+              const count = toolCount(name)
               return (
                 <button
-                  key={tool}
-                  className={`ptb-tool${activeTool === tool ? ' is-active' : ''}`}
-                  onClick={() => toggleTool(tool)}
+                  key={name}
+                  className={`ptb-tool${activeTool === name ? ' is-active' : ''}`}
+                  onClick={() => toggleTool(name)}
                   disabled={!currentIsAdded}
                   title={currentIsAdded ? hint : 'Add this page to the tray to annotate it'}
                 >
