@@ -562,13 +562,23 @@ html, body, #root {
 .output-card-grip:hover { color: var(--brand); }
 .output-card-grip:active { cursor: grabbing; }
 
-.output-card-thumb {
+/* Square, so the image still fits after a quarter turn and the card keeps
+   its height whichever way the page is facing. */
+.output-card-thumb-wrap {
   width: 54px;
-  height: auto;
+  height: 54px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+.output-card-thumb {
+  max-width: 100%;
+  max-height: 100%;
   border-radius: 4px;
   border: 1px solid var(--card-border);
-  flex-shrink: 0;
   display: block;
+  transition: transform .2s ease;
 }
 
 .output-card-meta {
@@ -613,6 +623,23 @@ html, body, #root {
 
 .output-card-remove:hover { color: #DC2626; background: #FEF2F2; }
 
+.output-card-rotate {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--brand-border);
+  cursor: pointer;
+  transition: color .12s, background .12s;
+}
+
+.output-card-rotate:hover { color: var(--brand); background: var(--gray-100); }
+
 /* ── Scrollbars ── */
 .source-scroll::-webkit-scrollbar,
 .output-scroll::-webkit-scrollbar {
@@ -651,6 +678,22 @@ html, body, #root {
   vertical-align: middle;
 }
 
+/* Rotation reads as a state of the page, not an edit to it, so it gets the
+   brand tint rather than the black "marked" badge. */
+.rotated-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: .3px;
+  vertical-align: middle;
+}
+
 /* ── Preview app-style tool ribbon ── */
 .preview-toolbar {
   display: flex;
@@ -669,6 +712,16 @@ html, body, #root {
   height: 26px;
   background: var(--gray-200);
   flex-shrink: 0;
+}
+
+/* Rotate buttons carry an icon only, so they lose the label's side padding. */
+.ptb-icon-only { padding: 0 10px; }
+
+.ptb-rotation {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brand);
+  letter-spacing: .3px;
 }
 
 .ptb-add {

@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { PDFDocument } from 'pdf-lib'
+import { PDFDocument, degrees } from 'pdf-lib'
 import {
   DndContext, closestCenter, KeyboardSensor, PointerSensor,
   useSensor, useSensors, DragOverlay, useDraggable, useDroppable,
@@ -37,6 +37,28 @@ const DEFAULT_SIG_FONT = SIGNATURE_FONTS[0].css
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Rotation is stored per output page as a clockwise delta on the page's own /Rotate. */
+const normalizeRotation = (deg) => ((deg % 360) + 360) % 360
+
+/**
+ * Turning the page turns everything drawn on it. Marks are stored as fractions
+ * of the page box, so a clockwise quarter turn sends (x, y) to (1 - y - h, x)
+ * and swaps width for height.
+ *
+ * Redaction rectangles pass through this exactly. A text or signature box has
+ * no stored height, so it goes through with h = 0: the anchor lands in the
+ * right place and the wrap width is left alone, which keeps the text where it
+ * belongs on the page even though a quarter turn may re-wrap it.
+ */
+function rotateFractionalRect({ x, y, w = 0, h = 0 }, delta) {
+  switch (normalizeRotation(delta)) {
+    case 90: return { x: 1 - y - h, y: x, w: h, h: w }
+    case 180: return { x: 1 - x - w, y: 1 - y - h, w, h }
+    case 270: return { x: y, y: 1 - x - w, w: h, h: w }
+    default: return { x, y, w, h }
+  }
+}
+
 function dataUrlToBytes(dataUrl) {
   const b64 = dataUrl.split(',')[1]
   const bin = atob(b64)
@@ -45,8 +67,10 @@ function dataUrlToBytes(dataUrl) {
   return out
 }
 
-async function renderThumb(page, displayWidth = 176) {
-  const nativeVp = page.getViewport({ scale: 1 })
+async function renderThumb(page, displayWidth = 176, rotation = 0) {
+  // getViewport's rotation is absolute, not additive, so the page's own
+  // /Rotate has to be folded in or rotating would discard it.
+  const nativeVp = page.getViewport({ scale: 1, rotation: page.rotate + rotation })
   const renderCanvas = document.createElement('canvas')
   renderCanvas.width = Math.ceil(nativeVp.width)
   renderCanvas.height = Math.ceil(nativeVp.height)
@@ -64,11 +88,13 @@ async function renderThumb(page, displayWidth = 176) {
   return dataUrl
 }
 
-async function renderPreview(pdfBytes, pageIndex) {
+async function renderPreview(pdfBytes, pageIndex, rotation = 0) {
   const buf = pdfBytes.buffer.slice(pdfBytes.byteOffset, pdfBytes.byteOffset + pdfBytes.byteLength)
   const pdfDoc = await getDocument({ data: buf, wasmUrl }).promise
   const page = await pdfDoc.getPage(pageIndex + 1)
-  return renderThumb(page, PREVIEW_WIDTH)
+  // Rendering the preview already rotated keeps the annotation overlay square
+  // with what the user sees, so pointer coordinates need no correction.
+  return renderThumb(page, PREVIEW_WIDTH, rotation)
 }
 
 // Ensure the signature script fonts are ready in the canvas before drawing.
@@ -368,9 +394,22 @@ function SignatureIcon() {
   )
 }
 
-function SortablePage({ page, onRemove, onPreview }) {
+function RotateIcon({ ccw = false }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+      style={ccw ? { transform: 'scaleX(-1)' } : undefined} aria-hidden="true"
+    >
+      <path d="M13 6.5A5.2 5.2 0 1 0 8 13" />
+      <path d="M13 2.5v4h-4" />
+    </svg>
+  )
+}
+
+function SortablePage({ page, onRemove, onRotate, onPreview }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: page.id })
   const modCount = (page.redactions?.length || 0) + (page.annotations?.length || 0)
+  const rotation = normalizeRotation(page.rotation || 0)
   return (
     <div
       ref={setNodeRef}
@@ -378,18 +417,26 @@ function SortablePage({ page, onRemove, onPreview }) {
       style={{ transform: CSS.Transform.toString(transform), transition }}
     >
       <div className="output-card-grip" {...attributes} {...listeners}><GripIcon /></div>
-      <img
-        src={page.thumbUrl} className="output-card-thumb" alt=""
-        onClick={() => onPreview(page.sourceId, page.pageIndex)}
-        style={{ cursor: 'zoom-in' }}
-      />
+      {/* Square box, so a quarter turn never changes the card's height. */}
+      <div className="output-card-thumb-wrap">
+        <img
+          src={page.thumbUrl} className="output-card-thumb" alt=""
+          onClick={() => onPreview(page.sourceId, page.pageIndex)}
+          style={{ cursor: 'zoom-in', transform: `rotate(${rotation}deg)` }}
+        />
+      </div>
       <div className="output-card-meta">
         <span className="output-card-file" title={page.sourceName}>{page.sourceName}</span>
         <span className="output-card-page">
           p. {page.pageIndex + 1}
+          {rotation > 0 && <span className="rotated-badge">{rotation}°</span>}
           {modCount > 0 && <span className="modified-badge">{modCount} marked</span>}
         </span>
       </div>
+      <button
+        className="output-card-rotate" onClick={() => onRotate(page.id, 90)}
+        title="Rotate right 90°"
+      ><RotateIcon /></button>
       <button className="output-card-remove" onClick={() => onRemove(page.id)} title="Remove">×</button>
     </div>
   )
@@ -427,7 +474,7 @@ function OutputDropZone({ children, hasCards }) {
 
 // ─── PagePreview ──────────────────────────────────────────────────────────────
 
-function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, onRemoveRedaction, onAddAnnotation, onUpdateAnnotation, onRemoveAnnotation, onClose }) {
+function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRedaction, onRemoveRedaction, onAddAnnotation, onUpdateAnnotation, onRemoveAnnotation, onClose }) {
   const pdf = sourcePdfs.find(p => p.id === item.pdfId)
   const [currentIndex, setCurrentIndex] = useState(item.pageIndex)
   const [previewUrl, setPreviewUrl] = useState(null)
@@ -446,18 +493,19 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
   const outputPage = outputPages.find(p => p.sourceId === item.pdfId && p.pageIndex === currentIndex)
   const redactions = outputPage?.redactions || []
   const annotations = outputPage?.annotations || []
+  const rotation = normalizeRotation(outputPage?.rotation || 0)
 
-  // Render high-res preview
+  // Render high-res preview, already rotated so the overlay lines up with it
   useEffect(() => {
     if (!pdf?.bytes) return
     let cancelled = false
     setLoading(true)
     setPreviewUrl(null)
-    renderPreview(pdf.bytes, currentIndex)
+    renderPreview(pdf.bytes, currentIndex, rotation)
       .then(url => { if (!cancelled) { setPreviewUrl(url); setLoading(false) } })
       .catch(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [pdf, currentIndex])
+  }, [pdf, currentIndex, rotation])
 
   // Reset tool when navigating pages
   useEffect(() => {
@@ -614,6 +662,26 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onAddRedaction, o
             })}
           </div>
 
+          <div className="ptb-divider" />
+
+          <div className="ptb-group">
+            {[
+              { delta: -90, label: 'Rotate left', ccw: true },
+              { delta: 90, label: 'Rotate right', ccw: false },
+            ].map(({ delta, label, ccw }) => (
+              <button
+                key={delta}
+                className="ptb-tool ptb-icon-only"
+                onClick={() => onRotate(outputPage.id, delta)}
+                disabled={!currentIsAdded}
+                title={currentIsAdded ? `${label} 90°` : 'Add this page to the tray to rotate it'}
+              >
+                <RotateIcon ccw={ccw} />
+              </button>
+            ))}
+            {rotation > 0 && <span className="ptb-rotation">{rotation}°</span>}
+          </div>
+
           <div className="ptb-hint">{activeTool ? toolMeta[activeTool].hint : ''}</div>
         </div>
 
@@ -734,11 +802,27 @@ export default function App() {
     setOutputPages(prev => [...prev, {
       id: uid(), sourcePageId, sourceId: pdf.id,
       pageIndex: page.pageIndex, sourceName: pdf.name.replace(/\.pdf$/i, ''),
-      thumbUrl: page.thumbUrl, redactions: [], annotations: [],
+      thumbUrl: page.thumbUrl, rotation: 0, redactions: [], annotations: [],
     }])
   }
 
   const removePage = (id) => setOutputPages(prev => prev.filter(p => p.id !== id))
+
+  /**
+   * Turn one tray page by a quarter, carrying its marks around with it. Doing
+   * this here rather than only at export means the preview and the exported
+   * file are driven by the same single rotation value.
+   */
+  const rotatePage = (pageId, delta) =>
+    setOutputPages(prev => prev.map(p => p.id !== pageId ? p : {
+      ...p,
+      rotation: normalizeRotation((p.rotation || 0) + delta),
+      redactions: p.redactions.map(r => rotateFractionalRect(r, delta)),
+      annotations: p.annotations.map(a => {
+        const { x, y } = rotateFractionalRect({ x: a.x, y: a.y, w: a.w || 0, h: 0 }, delta)
+        return { ...a, x, y }
+      }),
+    }))
 
   const toggleCollapse = (pdfId) => {
     setCollapsedPdfs(prev => { const n = new Set(prev); n.has(pdfId) ? n.delete(pdfId) : n.add(pdfId); return n })
@@ -896,7 +980,7 @@ export default function App() {
                   </div>
                 )}
                 {outputPages.map(page => (
-                  <SortablePage key={page.id} page={page} onRemove={removePage}
+                  <SortablePage key={page.id} page={page} onRemove={removePage} onRotate={rotatePage}
                     onPreview={(pdfId, pageIndex) => setPreviewItem({ pdfId, pageIndex })}
                   />
                 ))}
@@ -914,7 +998,11 @@ export default function App() {
           {activeOutputPage && (
             <div className="output-card overlay-card">
               <div className="output-card-grip"><GripIcon /></div>
-              <img src={activeOutputPage.thumbUrl} className="output-card-thumb" alt="" />
+              <div className="output-card-thumb-wrap">
+                <img src={activeOutputPage.thumbUrl} className="output-card-thumb" alt=""
+                  style={{ transform: `rotate(${normalizeRotation(activeOutputPage.rotation || 0)}deg)` }}
+                />
+              </div>
               <div className="output-card-meta">
                 <span className="output-card-file">{activeOutputPage.sourceName}</span>
                 <span className="output-card-page">p. {activeOutputPage.pageIndex + 1}</span>
@@ -931,6 +1019,7 @@ export default function App() {
           sourcePdfs={sourcePdfs}
           outputPages={outputPages}
           addPage={addPage}
+          onRotate={rotatePage}
           onAddRedaction={addRedaction}
           onRemoveRedaction={removeRedaction}
           onAddAnnotation={addAnnotation}
@@ -954,6 +1043,7 @@ export default function App() {
       if (!src) continue
 
       const needsRaster = (op.redactions?.length > 0) || (op.annotations?.length > 0)
+      const rotation = normalizeRotation(op.rotation || 0)
 
       if (needsRaster) {
         // Ensure signature fonts are loaded before we start drawing
@@ -966,9 +1056,12 @@ export default function App() {
         const pdfJsDoc = pdfJsCache[op.sourceId]
         const page = await pdfJsDoc.getPage(op.pageIndex + 1)
 
+        // Rendering rotated (rather than rotating the finished canvas) means the
+        // marks land using the very coordinates the preview captured them in.
         const scale = 2
-        const renderVp = page.getViewport({ scale })
-        const nativeVp = page.getViewport({ scale: 1 })
+        const absRotation = page.rotate + rotation
+        const renderVp = page.getViewport({ scale, rotation: absRotation })
+        const nativeVp = page.getViewport({ scale: 1, rotation: absRotation })
 
         const canvas = document.createElement('canvas')
         canvas.width = Math.ceil(renderVp.width)
@@ -1021,6 +1114,9 @@ export default function App() {
           pdfLibCache[op.sourceId] = await PDFDocument.load(src.bytes)
         }
         const [copied] = await out.copyPages(pdfLibCache[op.sourceId], [op.pageIndex])
+        // Set /Rotate rather than re-drawing, so the page stays vector and its
+        // text stays selectable. Additive, to keep the page's original rotation.
+        if (rotation) copied.setRotation(degrees(copied.getRotation().angle + rotation))
         out.addPage(copied)
       }
     }
