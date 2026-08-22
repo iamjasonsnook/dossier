@@ -630,14 +630,16 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
 
     const { x, y } = normCoords(e)
 
+    // One placement per click of the tool. Both of these open focused for
+    // typing, so leaving the tool armed only invites strays from the next
+    // click, including the click that dismisses the signature popover.
     if (activeTool === 'text') {
       onAddAnnotation(outputPage.id, { id: uid(), type: 'text', x, y, w: 0.35, text: '', fontSize: 18 })
-      // One box per click of the tool. The new box takes focus for typing, so
-      // leaving the tool armed only invites stray boxes from the next click.
       setActiveTool(null)
     }
     if (activeTool === 'signature') {
       onAddAnnotation(outputPage.id, { id: uid(), type: 'signature', x, y, w: 0.3, text: '', fontSize: 52, font: DEFAULT_SIG_FONT, inputMode: true })
+      setActiveTool(null)
     }
   }
 
@@ -659,7 +661,7 @@ function PagePreview({ item, sourcePdfs, outputPages, addPage, onRotate, onAddRe
     redact: { label: 'Redact', Icon: RedactIcon, hint: 'Drag a box to permanently remove what is beneath it.' },
     highlight: { label: 'Highlight', Icon: HighlightIcon, hint: 'Drag across a line of text to highlight it. Stays on for multiple lines.' },
     text: { label: 'Text', Icon: TextIcon, hint: 'Click the page to drop a single text box, then type.' },
-    signature: { label: 'Signature', Icon: SignatureIcon, hint: 'Click to place your signature, then type your name.' },
+    signature: { label: 'Signature', Icon: SignatureIcon, hint: 'Click to place a single signature, then type your name.' },
   }
   const toolCount = (name) =>
     name === 'redact' ? redactions.length
