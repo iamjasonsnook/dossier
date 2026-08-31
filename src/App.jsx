@@ -116,6 +116,21 @@ async function ensureSignatureFonts() {
   }
 }
 
+/**
+ * Turn a thrown export error into something a staff member can act on. The raw
+ * message goes to the console either way; this is only about the banner.
+ */
+function describeExportError(err) {
+  const msg = String(err?.message || err || 'Unknown error')
+  if (/encrypt|password/i.test(msg)) {
+    return 'One of the source PDFs is password-protected and could not be read.'
+  }
+  if (/quota|allocation|out of memory|Array buffer allocation/i.test(msg)) {
+    return 'Ran out of memory building the PDF. Try exporting fewer pages at a time.'
+  }
+  return msg
+}
+
 // Word-wrapped text for canvas, top-aligned to mirror a textarea with padding:0
 // and line-height 1.4 (glyphs vertically centered within each line box). Greedy
 // word wrap on spaces — the same algorithm browsers use — so lines break at the
@@ -828,6 +843,11 @@ export default function App() {
   const [activeDragId, setActiveDragId] = useState(null)
   const [activeDragData, setActiveDragData] = useState(null)
   const [collapsedPdfs, setCollapsedPdfs] = useState(new Set())
+  // Export runs long enough on rasterized pages to look dead, and until now any
+  // throw inside it vanished as an unhandled rejection. Track both so the
+  // button can say what it is doing and what went wrong.
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState(null)
   const [previewItem, setPreviewItem] = useState(null)
   const fileInputRef = useRef(null)
 
@@ -980,11 +1000,20 @@ export default function App() {
             <input className="filename-input" value={filename} onChange={e => setFilename(e.target.value)} placeholder="assembled" spellCheck={false} />
             <span className="filename-ext">.pdf</span>
           </div>
-          <button className="btn-export" onClick={exportPdf} disabled={outputPages.length === 0}>
-            Export{outputPages.length > 0 ? ` (${outputPages.length} pages)` : ' PDF'}
+          <button className="btn-export" onClick={exportPdf} disabled={outputPages.length === 0 || exporting}>
+            {exporting
+              ? 'Exporting\u2026'
+              : `Export${outputPages.length > 0 ? ` (${outputPages.length} pages)` : ' PDF'}`}
           </button>
         </div>
       </header>
+
+      {exportError && (
+        <div className="export-error" role="alert">
+          <span><strong>Export failed:</strong> {exportError}</span>
+          <button className="export-error-dismiss" onClick={() => setExportError(null)}>&times;</button>
+        </div>
+      )}
 
       <DndContext sensors={sensors} collisionDetection={closestCenter}
         onDragStart={handleDragStart} onDragEnd={handleDragEnd}
@@ -1139,14 +1168,32 @@ export default function App() {
 
   // ─── Export — burns all markings permanently into rasterized pages ──────────
   async function exportPdf() {
-    if (!outputPages.length) return
+    if (!outputPages.length || exporting) return
+    setExporting(true)
+    setExportError(null)
+    try {
+      await buildAndDownloadPdf()
+    } catch (err) {
+      // Previously this rejection went nowhere, so a failed export was
+      // indistinguishable from a dead button. Say so, and keep the detail in
+      // the console for anything the message does not cover.
+      console.error('Export failed:', err)
+      setExportError(describeExportError(err))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  async function buildAndDownloadPdf() {
     const out = await PDFDocument.create()
     const pdfLibCache = {}
     const pdfJsCache = {}
 
+    const orphaned = []
+
     for (const op of outputPages) {
       const src = sourcePdfs.find(p => p.id === op.sourceId)
-      if (!src) continue
+      if (!src) { orphaned.push(op); continue }
 
       const needsRaster = (op.redactions?.length > 0) || (op.highlights?.length > 0) || (op.annotations?.length > 0)
       const rotation = normalizeRotation(op.rotation || 0)
@@ -1231,7 +1278,10 @@ export default function App() {
       } else {
         // Clean page — copy as vectors, preserving text and quality
         if (!pdfLibCache[op.sourceId]) {
-          pdfLibCache[op.sourceId] = await PDFDocument.load(src.bytes)
+          // PDF.js opens encrypted files with an empty owner password without
+          // complaint, so a "secured" scan previews perfectly and then throws
+          // here. Match PDF.js rather than fail the whole export on it.
+          pdfLibCache[op.sourceId] = await PDFDocument.load(src.bytes, { ignoreEncryption: true })
         }
         const [copied] = await out.copyPages(pdfLibCache[op.sourceId], [op.pageIndex])
         // Set /Rotate rather than re-drawing, so the page stays vector and its
@@ -1241,13 +1291,31 @@ export default function App() {
       }
     }
 
+    if (!out.getPageCount()) {
+      throw new Error('None of the tray pages could be read from their source files.')
+    }
+    if (orphaned.length) {
+      throw new Error(
+        `${orphaned.length} page${orphaned.length !== 1 ? 's' : ''} in the tray no longer have a source file loaded. ` +
+        'Re-add the missing PDF, or remove those pages, then export again.'
+      )
+    }
+
     const pdfBytes = await out.save()
     const blob = new Blob([pdfBytes], { type: 'application/pdf' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${filename || 'assembled'}.pdf`
+    a.download = `${(filename || 'assembled').replace(/[/\\?%*:|"<>]/g, '-')}.pdf`
+    // Safari ignores a click on a detached anchor, and revoking the URL in the
+    // same tick cancels the download before it starts. Attach, click, and let
+    // the navigation begin before tearing the URL down.
+    a.style.display = 'none'
+    document.body.appendChild(a)
     a.click()
-    URL.revokeObjectURL(url)
+    setTimeout(() => {
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }, 10000)
   }
 }
