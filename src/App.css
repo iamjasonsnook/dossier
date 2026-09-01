@@ -204,6 +204,20 @@ html, body, #root {
 
 .export-error-dismiss:hover { opacity: 1; }
 
+.export-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 24px;
+  background: #FFFBEB;
+  border-bottom: 1px solid #FDE68A;
+  color: #92400E;
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* ── Body panels ── */
 .app-body {
   display: flex;

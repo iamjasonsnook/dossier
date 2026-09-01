@@ -848,6 +848,7 @@ export default function App() {
   // button can say what it is doing and what went wrong.
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState(null)
+  const [exportNotice, setExportNotice] = useState(null)
   const [previewItem, setPreviewItem] = useState(null)
   const fileInputRef = useRef(null)
 
@@ -1015,6 +1016,13 @@ export default function App() {
         </div>
       )}
 
+      {exportNotice && (
+        <div className="export-notice" role="status">
+          <span><strong>Exported.</strong> {exportNotice}</span>
+          <button className="export-error-dismiss" onClick={() => setExportNotice(null)}>&times;</button>
+        </div>
+      )}
+
       <DndContext sensors={sensors} collisionDetection={closestCenter}
         onDragStart={handleDragStart} onDragEnd={handleDragEnd}
         onDragCancel={() => { setActiveDragId(null); setActiveDragData(null) }}
@@ -1171,6 +1179,7 @@ export default function App() {
     if (!outputPages.length || exporting) return
     setExporting(true)
     setExportError(null)
+    setExportNotice(null)
     try {
       await buildAndDownloadPdf()
     } catch (err) {
@@ -1190,12 +1199,31 @@ export default function App() {
     const pdfJsCache = {}
 
     const orphaned = []
+    const flattened = new Set()
+
+    /**
+     * pdf-lib can parse an encrypted file's structure but cannot decrypt its
+     * content streams, so a vector copy of one yields a page that is
+     * structurally valid and completely blank. Detect it up front and let the
+     * caller rasterize instead; PDF.js does decrypt, so that path is faithful.
+     */
+    const loadForCopy = async (sourceId, bytes) => {
+      if (!pdfLibCache[sourceId]) {
+        pdfLibCache[sourceId] = await PDFDocument.load(bytes, { ignoreEncryption: true })
+      }
+      return pdfLibCache[sourceId]
+    }
 
     for (const op of outputPages) {
       const src = sourcePdfs.find(p => p.id === op.sourceId)
       if (!src) { orphaned.push(op); continue }
 
-      const needsRaster = (op.redactions?.length > 0) || (op.highlights?.length > 0) || (op.annotations?.length > 0)
+      const hasMarks = (op.redactions?.length > 0) || (op.highlights?.length > 0) || (op.annotations?.length > 0)
+      // A secured PDF has to be rasterized whether or not it carries marks:
+      // copying it as vectors would silently produce a blank page.
+      const encrypted = (await loadForCopy(op.sourceId, src.bytes)).isEncrypted
+      if (encrypted) flattened.add(src.name)
+      const needsRaster = hasMarks || encrypted
       const rotation = normalizeRotation(op.rotation || 0)
 
       if (needsRaster) {
@@ -1276,14 +1304,8 @@ export default function App() {
         const newPage = out.addPage([nativeVp.width, nativeVp.height])
         newPage.drawImage(pngImage, { x: 0, y: 0, width: nativeVp.width, height: nativeVp.height })
       } else {
-        // Clean page — copy as vectors, preserving text and quality
-        if (!pdfLibCache[op.sourceId]) {
-          // PDF.js opens encrypted files with an empty owner password without
-          // complaint, so a "secured" scan previews perfectly and then throws
-          // here. Match PDF.js rather than fail the whole export on it.
-          pdfLibCache[op.sourceId] = await PDFDocument.load(src.bytes, { ignoreEncryption: true })
-        }
-        const [copied] = await out.copyPages(pdfLibCache[op.sourceId], [op.pageIndex])
+        // Clean, unencrypted page — copy as vectors, preserving text and quality
+        const [copied] = await out.copyPages(await loadForCopy(op.sourceId, src.bytes), [op.pageIndex])
         // Set /Rotate rather than re-drawing, so the page stays vector and its
         // text stays selectable. Additive, to keep the page's original rotation.
         if (rotation) copied.setRotation(degrees(copied.getRotation().angle + rotation))
@@ -1313,6 +1335,17 @@ export default function App() {
     a.style.display = 'none'
     document.body.appendChild(a)
     a.click()
+
+    if (flattened.size) {
+      const names = [...flattened]
+      setExportNotice(
+        `${names.length === 1 ? names[0] : `${names.length} files`} ` +
+        `${names.length === 1 ? 'is' : 'are'} password-protected, so ` +
+        `${names.length === 1 ? 'its' : 'their'} pages were exported as images. ` +
+        'They will look correct but their text is no longer selectable.'
+      )
+    }
+
     setTimeout(() => {
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
